@@ -1,10 +1,6 @@
 ---
 name: source-first
-description: "动手之前先找依据：写内容前查文献（Crossref、OpenAlex、arXiv、DOAJ、ChinaXiv），写代码前查现成实现（GitHub、Gitee），每条引用都能点开，每个推荐都对得上你的约束。用于写文献综述、研究现状、开题报告、整理课程笔记、做专题汇总，也用于课设、毕设、竞赛选题时查有没有现成项目、能不能复用、要改多少（literature review, related work, capstone project, open-source implementation）。不用于凭空写文章、代写论文正文、代写代码，不访问知网和校内系统。"
-name_cn: 先有出处
-description_cn: 动手之前先找依据。写内容前查文献，写代码前查现成实现，每条引用可验证，不编造。
-version: 1.2.0
-agent_created: true
+description: "先有出处（动手之前先找依据）：写内容前查真实文献（Crossref、OpenAlex、arXiv、DBLP、DOAJ 等公开源，另有中文库替代路径），写代码前查现成实现（GitHub、Gitee），每条引用都能点开，每个推荐都对得上你的约束。用于写文献综述、研究现状、开题报告、整理课程笔记、专题汇总，以及“帮我找几篇论文”“参考文献别瞎编”“老师让我写研究现状”“这个题目是不是烂大街了”“这个毕设有人做过吗”“有没有现成的能直接用”等课设/毕设/竞赛选题场景（literature review, related work, capstone project, open-source implementation）。不用于凭空写文章、代写论文正文、代写整套代码，不访问知网和校内系统。"
 ---
 
 # 先有出处
@@ -46,7 +42,7 @@ agent_created: true
 - 让 AI 直接写完一段代码，或者代写论文正文核心章节
 - 明确说了不用管出处，只要个大概
 
-**命中上述“不进入”条款时要说出口。** 仅当任务看似相关但命中了排除项（如要求直接代写代码、润色已有成稿）时，用一句话说明不走本技能，然后按普通任务做。完全不相关的日常任务无需说明，直接退出。这句话只说一句，不用解释为什么。
+**仅在明确命中核心排除项时说出口。** 当用户明显要求**代写论文正文**或**直接代写整套毕设/课设代码**时，用一句话说明不走本技能，然后按普通任务处理（只说一句，不讲道理）。日常混合对话中顺手写段代码、润色一句话或完全无关的任务，静默退回普通模式，不要生硬打断。
 
 判断不清时进入，走最轻的那一档。查一遍的成本，远低于写出一堆假东西。
 
@@ -67,8 +63,10 @@ agent_created: true
 - `references/repos.md` — 代码仓库检索方法，含 Gitee 检索策略
 - `references/citation-formats.md` — GB/T 7714 与 APA 第 7 版，含接口字段映射
 - `references/output-templates.md` — 两条线的输出模板和填好的例子
-- `scripts/lookup.py` — 文献线只读并发检索脚本（一次查 Crossref / OpenAlex / arXiv / DOAJ）
-- `scripts/github_lookup.py` — 项目线只读检索脚本（查 GitHub 仓库、体积、许可证与根目录关键文件）
+- `references/setup-guide.md` — 可选环境变量与 Token 配置指南
+- `scripts/lookup.py` — 文献线只读并发检索脚本（支持 `--doi` 反查、`--bibtex` 导出、跨源去重）
+- `scripts/github_lookup.py` — 项目线只读检索脚本（含 Trees API 前后端子目录探测与体积检查）
+- `scripts/check_environment.py` — 只读环境与接口连通性自检脚本
 
 **按阶段按需加载，不要两条线一起加载**：
 - 文献线：检索阶段读 `study.md` + `sources.md`（优先运行 `scripts/lookup.py`）；排版生成阶段再读 `citation-formats.md` + `output-templates.md`。
@@ -77,6 +75,7 @@ agent_created: true
 ## 交付前自检
 
 - [ ] 走了对的那条线，没有两条混用
+- [ ] 确认至少一个检索源正常返回过（非全源请求失败），否则不能写“研究空白”或覆盖说明
 - [ ] 每条引用 / 每个推荐都能点开验证
 - [ ] 核对过标题、作者、年份（或仓库名、语言、更新时间）
 - [ ] 覆盖情况写清楚了：查了什么、没查什么、哪里是空白

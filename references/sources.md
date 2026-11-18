@@ -2,7 +2,7 @@
 
 四个接口能直接调，它们是所有引用的唯一合法来源。下面每个地址都实测过，状态标注在 2026-11-17。
 
-**优先使用内置脚本**：如果环境支持 Python，直接运行 `python scripts/lookup.py "<关键词>" --json`（支持 `--sources`、`--limit`、`--abstract`），它会并发查询四个源并提取完整书目字段（期刊名、卷、期、页码、DOI、OA 链接）。若环境变量中设有 `OPENALEX_API_KEY` 或 `CROSSREF_MAILTO`，脚本会自动带上以提升额度。跑不了 Python 时，再按下面地址直接发请求。
+**优先使用内置脚本**：如果环境支持 Python，直接运行 `python scripts/lookup.py "<关键词>" --json`（支持 `--doi` 反查、`--sources`、`--limit`、`--abstract`、`--bibtex`），它会并发查询 Crossref、OpenAlex、arXiv、DBLP、DOAJ（有 `S2_API_KEY` 时自动包含 Semantic Scholar），并自动去重互补字段。环境变量配置见 `references/setup-guide.md`。跑不了 Python 时，再按下面地址直接发请求。
 
 ## Crossref：书目信息最准
 
@@ -41,16 +41,23 @@ https://export.arxiv.org/api/query?search_query=<百分号编码的查询>&start
 - 一次查一个分类，请求之间隔几秒。并发会被限。
 - 只覆盖预印本，未经同行评审的居多。引用时要注明这是预印本。
 
+## DBLP：计算机/AI 顶会与期刊，元数据极干净
+
+```
+https://dblp.org/search/publ/api?q=<关键词>&h=5&format=json
+```
+
+- 完全免费，不需要 key，无严格限流。
+- 计算机科学与人工智能领域的会议（`[C]`）和期刊（`[J]`）覆盖极好，比 arXiv 预印本噪音小得多。
+
 ## DOAJ：开放获取期刊，有全文
 
 ```
-https://doaj.org/api/search/articles/<关键词>?pageSize=5
+https://doaj.org/api/search/articles/<百分号编码的关键词>?pageSize=5
 ```
 
 - 免费，不需要 key。实测 200，返回 JSON。
-- 只收录开放获取期刊，命中率比 Crossref 低，但命中的都能拿到全文。
-- 适合找可以放心引用全文的文献。
-- **中文检索基本无效。** 实测搜「图书管理系统」，返回的是 GIS 现场验收、海洋工程结构设计这类完全无关的条目。DOAJ 的中文分词和相关性都很差，中文方向不要用它，换了也白换。
+- **相关性普遍偏低，仅作补充源，不优先用。** 实测不仅中文搜「图书管理系统」返回无关条目，英文搜 `retrieval augmented generation` 也常返回偏题文章，使用前必须人工核对标题与摘要。
 
 ## Semantic Scholar：备用，经常限流
 
@@ -81,7 +88,7 @@ https://api.semanticscholar.org/graph/v1/paper/search?query=<关键词>&limit=5&
 
 按可靠性排，四条路：
 
-1. **让用户自己下载。** 从学校图书馆把 PDF 下下来上传，技能负责整理、核验、生成引用。这条路命中率接近百分之百，优先用它。
+1. **让用户自己下载 PDF。** 从学校图书馆把 PDF 下下来上传，技能负责整理、核验、生成引用。这条路命中率接近百分之百，优先用它。**注意：知网默认下载的 `.caj` 专有格式无法直接读取，需提前提醒用户在下载页选择“PDF 下载”或用 CAJViewer 转为 PDF 再上传。**
 2. **Crossref 查中文期刊的 DOI。** 正规中文期刊多数有 DOI，能核到就是真的，而且元数据最规范。
 3. **中国科技论文在线** `https://www.paper.edu.cn/` 可访问，收录部分中文论文，能直接检索。
 4. **ChinaXiv** `https://chinaxiv.org/`，中科院科技论文预发布平台，可访问。站点是前端渲染，静态抓取进不去，必须用浏览器打开页面检索。

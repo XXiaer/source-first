@@ -1,0 +1,31 @@
+name: API Health & Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # 每周一北京时间 09:00 自动巡检一次公开接口状态
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+
+jobs:
+  test-and-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run zero-network unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Probe public API endpoints
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/check_environment.py --strict

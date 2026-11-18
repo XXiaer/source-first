@@ -41,7 +41,10 @@ https://api.github.com/search/repositories?q=<关键词>&sort=updated&per_page=5
 - 搜索接口 10 次/分钟
 - 其他接口 60 次/小时
 
-超了返回 403，`message` 里写 `API rate limit exceeded`。看到这个就**停下**，不要再试。手工打开网页搜，或者换成 Gitee 和通用搜索。
+超了返回 403，`message` 里写 `API rate limit exceeded`。看到这个就**停下**，不要再试。改用以下替代路径：
+- 网页搜索 `site:github.com <关键词>`
+- 打开 Gitee 网页搜索或用 `site:gitee.com <关键词> 毕业设计`
+- 配置只读 `GITHUB_TOKEN`（见 `references/setup-guide.md`）可将目录检查限额提升至 5000 次/小时。
 
 ## Gitee：只能开浏览器
 

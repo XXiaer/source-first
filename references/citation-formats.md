@@ -28,6 +28,7 @@
 | 年份 | `publication_year` |
 | 作者 | `authorships[].author.display_name` |
 | 期刊/来源 | `primary_location.source.display_name` |
+| 卷期页 | `biblio.volume` / `biblio.issue` / `biblio.first_page`-`biblio.last_page`（若缺失需回 DOI 页面或 Crossref 补齐） |
 | DOI | `doi`（已经是完整 URL） |
 | 全文 | `open_access.oa_url` |
 

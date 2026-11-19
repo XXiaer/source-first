@@ -2,7 +2,7 @@
 
 两份格式，按用户要求选。没要求时，中文论文用 GB/T 7714，英文论文用 APA 第 7 版。
 
-所有字段都从接口返回里取，不手打。下面是取哪个字段、怎么拼。
+所有字段都从接口返回里取，不手打。注：`scripts/lookup.py` 已自动将 Crossref 西文作者统一成 `Given Family` 顺序，与 OpenAlex、arXiv、DBLP、DOAJ、Semantic Scholar 保持一致，格式化 GB/T 7714 时请按“姓前名缩写后”规则转换。
 
 ## 接口字段映射
 
@@ -10,8 +10,8 @@
 
 | 引用字段 | 取自 | 说明 |
 |---|---|---|
-| 作者 | `author[]` 的 `family` + `given` | 中文名 `family` 也可能是全名 |
-| 标题 | `title[0]` | 可能带 HTML 标签，要清掉 |
+| 作者 | `author[]` 的 `family` + `given` | 中文名 `family` 也可能是全名；`lookup.py` 已统一输出 `Given Family` |
+| 标题 | `title[0]` | 可能带 HTML/JATS 标签，要清掉 |
 | 期刊名 | `container-title[0]` | 没有这个字段说明是书或会议论文，看 `type` |
 | 年份 | `issued.date-parts[0][0]` | 有时是字符串，转成数字 |
 | 卷 | `volume` | 可能缺失 |
@@ -22,37 +22,63 @@
 
 ### OpenAlex
 
-| 引用字段 | 取自 |
-|---|---|
-| 标题 | `title` |
-| 年份 | `publication_year` |
-| 作者 | `authorships[].author.display_name` |
-| 期刊/来源 | `primary_location.source.display_name` |
-| 卷期页 | `biblio.volume` / `biblio.issue` / `biblio.first_page`-`biblio.last_page`（若缺失需回 DOI 页面或 Crossref 补齐） |
-| DOI | `doi`（已经是完整 URL） |
-| 全文 | `open_access.oa_url` |
+| 引用字段 | 取自 | 说明 |
+|---|---|---|
+| 标题 | `title` | 可能需要清标签 |
+| 年份 | `publication_year` | — |
+| 作者 | `authorships[].author.display_name` | `Given Family` 顺序 |
+| 期刊/来源 | `primary_location.source.display_name` | — |
+| 卷期页 | `biblio.volume` / `biblio.issue` / `biblio.first_page`-`biblio.last_page` | 若缺失需回 DOI 页面或 Crossref 补齐 |
+| DOI | `doi` | 已经是完整 URL |
+| 类型 | `type` | 如 `article`、`preprint`（来源含 arXiv 且缺省时归入预印本） |
+| 全文 | `open_access.oa_url` | 开放获取直链，非文献类型 |
 
 ### arXiv（`<entry>` 里的 XML）
 
-| 引用字段 | 取自 |
-|---|---|
-| 作者 | `<author><name>`，多个用逗号连 |
-| 标题 | `<title>`，去掉换行和多余空格 |
-| 年份 | `<published>` 的前四位 |
-| 编号 | `<id>` 末尾那段，形如 `2401.12345` |
-| 链接 | `https://arxiv.org/abs/<编号>` |
-| 类型 | 一律标"预印本" |
+| 引用字段 | 取自 | 说明 |
+|---|---|---|
+| 作者 | `<author><name>` | 多个用逗号连 |
+| 标题 | `<title>` | 去掉换行和多余空格 |
+| 年份 | `<published>` 的前四位 | — |
+| 编号 | `<id>` 末尾那段 | 形如 `2401.12345` |
+| 链接 | `https://arxiv.org/abs/<编号>` | — |
+| 类型 | — | 一律标“预印本” |
+
+### DBLP（`result.hits.hit[].info`）
+
+| 引用字段 | 取自 | 说明 |
+|---|---|---|
+| 标题 | `title` | 末尾通常自带句点，拼接时需去掉 |
+| 作者 | `authors.author[].text` | 单作者时可能是对象而非数组 |
+| 会议/期刊 | `venue` | 若为 `CoRR` 则实质为 arXiv 预印本 |
+| 年份 | `year` | — |
+| 卷期页 | `volume` / `number` / `pages` | 可能缺失 |
+| 链接/DOI | `doi` 或 `ee` 或 `url` | 有 `doi` 优先拼 `https://doi.org/<DOI>` |
+| 类型 | `type` | `CoRR` 或指向 arXiv 的 `Informal...` 必须标“预印本” |
 
 ### DOAJ
 
-| 引用字段 | 取自 |
-|---|---|
-| 标题 | `bibjson.title` |
-| 作者 | `bibjson.author[].name` |
-| 期刊 | `bibjson.journal.title` |
-| 年 | `bibjson.year` |
-| 卷期页 | `bibjson.journal.volume` / `number` / `start_page`-`end_page` |
-| DOI | `bibjson.identifier[]` 里 `type` 为 `doi` 的那条 |
+| 引用字段 | 取自 | 说明 |
+|---|---|---|
+| 标题 | `bibjson.title` | — |
+| 作者 | `bibjson.author[].name` | — |
+| 期刊 | `bibjson.journal.title` | — |
+| 年 | `bibjson.year` | — |
+| 卷期页 | `bibjson.journal.volume` / `number` / `start_page`-`end_page` | — |
+| DOI | `bibjson.identifier[]` 里 `type` 为 `doi` 的那条 | — |
+| 类型 | 固定为 `journal-article` | DOAJ 仅收录开放获取期刊论文 |
+
+### Semantic Scholar（`data[]`）
+
+| 引用字段 | 取自 | 说明 |
+|---|---|---|
+| 标题 | `title` | — |
+| 作者 | `authors[].name` | — |
+| 会议/期刊 | `venue` | 无卷期页字段，需用 DOI 去 Crossref 补齐 |
+| 年份 | `year` | — |
+| 标识/链接 | `externalIds.DOI` / `externalIds.ArXiv` | 分别拼 `doi.org` 或 `arxiv.org/abs` |
+| 类型 | `publicationTypes` | `JournalArticle`→期刊、`Conference`→会议；仅有 ArXiv ID 时标“预印本” |
+| 全文 | `openAccessPdf.url` | 开放获取 PDF 链接 |
 
 ## GB/T 7714-2015
 
@@ -88,10 +114,10 @@
 
 规则：
 
-- 作者三人以内全列，超过三人列前三个加"等"（英文加 `et al.`）。
-- 西文作者姓在前名缩写在后，不加缩写点：`Smith J, Brown A`.
+- 作者三人以内全列，超过三人列前三个加“等”（英文加 `et al.`）。
+- 西文作者姓在前名缩写在后，不加缩写点：`Smith J, Brown A`。
 - 文献类型标识必须带：`[J]` 期刊、`[M]` 专著、`[D]` 学位论文、`[C]` 会议、`[EB/OL]` 电子资源。
-- 缺卷或缺期就跳过那一项，不要写"无"或留空括号。
+- 缺卷或缺期就跳过那一项，不要写“无”或留空括号。
 - 中文文献末尾不加句点以外的标点。
 
 ## APA 第 7 版
@@ -121,7 +147,7 @@ Author, A. A. (Year, Month Day). Title. Site Name. https://arxiv.org/abs/2401.12
 
 论文类型影响证据强度，必须在引用里体现：
 
-- arXiv 预印本：GB/T 7714 用 `[EB/OL]`，并在后面注明"预印本，未经同行评审"。APA 在标题后加 `[Preprint]`。
+- arXiv / DBLP CoRR 预印本：GB/T 7714 用 `[EB/OL]`，并在后面注明“预印本，未经同行评审”。APA 在标题后加 `[Preprint]`。
 - 会议论文：`[C]`，注明会议名和年份。
 - 期刊论文：`[J]`，正常格式。
 
@@ -134,6 +160,6 @@ Author, A. A. (Year, Month Day). Title. Site Name. https://arxiv.org/abs/2401.12
 - [ ] 每条都能在接口返回里找到原始记录
 - [ ] DOI 或 arXiv 编号和返回的一致，一位不差
 - [ ] 年份和返回的一致
-- [ ] 作者顺序和返回的一致
-- [ ] 没有把预印本标成期刊论文
+- [ ] 作者顺序和返回的一致，且按目标规范格式转换姓与名
+- [ ] 没有把预印本（含 DBLP `CoRR`）标成期刊论文
 - [ ] 中文和英文的标点没混用

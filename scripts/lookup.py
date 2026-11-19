@@ -4,8 +4,8 @@
     python lookup.py "retrieval augmented generation"
     python lookup.py "图书管理" --sources crossref,openalex,dblp
     python lookup.py --doi 10.1145/3777378 --json
+    python lookup.py "RAG" --limit 3 --year-from 2023 --abstract --json
     python lookup.py "RAG" --limit 3 --bibtex
-    python lookup.py "RAG" --limit 3 --abstract --json
 
 可选环境变量：
     OPENALEX_API_KEY   OpenAlex 免费 API Key，提升每日额度
@@ -16,7 +16,7 @@
 退出码：
     0  至少一个源返回有效结果
     1  所选源正常返回但均为 0 条结果
-    2  参数错误（如关键词为空）
+    2  参数错误（如关键词为空、年份范围非法或无可用源）
     3  所有请求的源全部失败（网络/限流），不可当作“无文献”
 """
 
@@ -36,14 +36,26 @@ TIMEOUT = 20
 MAX_AUTHORS = 20
 # 仅匹配合法 HTML/JATS 标签，避免误删数学式中的 < 或 >（如 a < b > c）
 TAG_RE = re.compile(r"</?(?:[a-zA-Z][a-zA-Z0-9:-]*)(?:\s[^>]*)?>")
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+ARXIV_SYNTAX_RE = re.compile(
+    r"(?:^|\s)(?:cat|ti|au|abs|co|jr|rn|id|all):|\s(?:AND|OR|ANDNOT)\s"
+)
+BIBTEX_ESCAPE_RE = re.compile(r"([\\&%#_])")
+BIBTEX_ESCAPE_MAP = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "#": r"\#",
+    "_": r"\_",
+}
 
 
 def build_user_agent():
     """构造请求头 User-Agent，如设置了 CROSSREF_MAILTO 则附加礼貌池信息。"""
     mailto = os.environ.get("CROSSREF_MAILTO", "").strip()
     if mailto:
-        return f"source-first-lookup/1.3 (academic citation lookup; mailto:{mailto})"
-    return "source-first-lookup/1.3 (academic citation lookup; read-only)"
+        return f"source-first-lookup/1.4 (academic citation lookup; mailto:{mailto})"
+    return "source-first-lookup/1.4 (academic citation lookup; read-only)"
 
 
 def fetch(url, extra_headers=None):
@@ -68,19 +80,29 @@ def clean_text(text):
 def strip_doi_prefix(url):
     """去掉 https://doi.org/ 或 http://dx.doi.org/ 前缀，保留纯 DOI。"""
     s = (url or "").strip()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/"):
+    for prefix in (
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+    ):
         if s.lower().startswith(prefix):
             return s[len(prefix):]
     return s
 
 
 def join_authors(pairs):
-    """pairs 是 (姓, 名) 列表。中文文献两者常相同，去掉重复。"""
+    """pairs 是 (姓, 名) 列表；中文保留姓+名，西文统一为 Given Family，与其余源一致。"""
     out = []
     for fam, giv in pairs:
         fam = (fam or "").strip()
         giv = (giv or "").strip()
-        name = giv if fam and fam == giv else f"{fam} {giv}".strip()
+        if fam and fam == giv:
+            name = giv
+        elif fam and giv:
+            name = f"{fam}{giv}" if CJK_RE.search(fam + giv) else f"{giv} {fam}"
+        else:
+            name = fam or giv
         if name and name not in out:
             out.append(name)
     return ", ".join(out)
@@ -99,6 +121,24 @@ def decode_openalex_abstract(inv_idx):
             if 0 <= pos <= max_pos:
                 words[pos] = token
     return " ".join(w for w in words if w)
+
+
+def extract_year_int(year_val):
+    """从年份字段提取 4 位整数年份，失败返回 None。"""
+    m = re.search(r"\b(1\d{3}|2\d{3})\b", str(year_val or ""))
+    return int(m.group(1)) if m else None
+
+
+def filter_by_year(rows, year_from=None):
+    """按起始年份过滤条目；仅剔除可解析年份且明确早于 year_from 的记录。"""
+    if year_from is None:
+        return rows
+    kept = []
+    for row in rows:
+        y = extract_year_int(row.get("year"))
+        if y is None or y >= year_from:
+            kept.append(row)
+    return kept
 
 
 def parse_crossref_item(it, include_abstract=False):
@@ -132,26 +172,25 @@ def parse_crossref_item(it, include_abstract=False):
     return row
 
 
-def query_crossref(kw, limit, include_abstract=False):
+def query_crossref(kw, limit, include_abstract=False, year_from=None):
     """查询 Crossref 书目接口。"""
     fields = "title,author,issued,DOI,container-title,volume,issue,page,type"
     if include_abstract:
         fields += ",abstract"
-    url = (
-        "https://api.crossref.org/works?"
-        + urllib.parse.urlencode(
-            {
-                "query.bibliographic": kw,
-                "rows": str(limit),
-                "select": fields,
-            }
-        )
-    )
+    params = {
+        "query.bibliographic": kw,
+        "rows": str(limit),
+        "select": fields,
+    }
+    if year_from is not None:
+        params["filter"] = f"from-pub-date:{year_from}"
+    url = "https://api.crossref.org/works?" + urllib.parse.urlencode(params)
     data = json.loads(fetch(url))
-    return [
+    rows = [
         parse_crossref_item(it, include_abstract)
         for it in data.get("message", {}).get("items", [])
     ]
+    return filter_by_year(rows, year_from)
 
 
 def parse_openalex_item(it, include_abstract=False):
@@ -163,18 +202,22 @@ def parse_openalex_item(it, include_abstract=False):
     ]
     oa = (it.get("open_access") or {}).get("oa_url") or ""
     source_obj = (it.get("primary_location") or {}).get("source") or {}
+    source_name = clean_text(source_obj.get("display_name"))
     biblio = it.get("biblio") or {}
     first_p = biblio.get("first_page") or ""
     last_p = biblio.get("last_page") or ""
     page = f"{first_p}-{last_p}" if first_p and last_p else (first_p or last_p)
     doi_url = it.get("doi") or ""
+    item_type = (it.get("type") or "").strip()
+    if not item_type and "arxiv" in source_name.lower():
+        item_type = "preprint"
     row = {
         "source": "openalex",
         "year": it.get("publication_year"),
         "title": clean_text(it.get("title")),
         "authors": ", ".join(a for a in authors if a),
         "author_count": len(all_authorships),
-        "journal": clean_text(source_obj.get("display_name")),
+        "journal": source_name,
         "volume": biblio.get("volume") or "",
         "issue": biblio.get("issue") or "",
         "page": page,
@@ -182,16 +225,16 @@ def parse_openalex_item(it, include_abstract=False):
         "url": doi_url,
         "oa_url": oa,
         "cited_by_count": it.get("cited_by_count"),
-        "type": "open access" if oa else "",
+        "type": item_type,
     }
     if include_abstract:
         row["abstract"] = decode_openalex_abstract(it.get("abstract_inverted_index"))
     return row
 
 
-def query_openalex(kw, limit, include_abstract=False):
+def query_openalex(kw, limit, include_abstract=False, year_from=None):
     """查询 OpenAlex 文献接口。"""
-    fields = "title,publication_year,doi,authorships,open_access,primary_location,cited_by_count,biblio"
+    fields = "title,publication_year,doi,authorships,open_access,primary_location,cited_by_count,biblio,type"
     if include_abstract:
         fields += ",abstract_inverted_index"
     params = {
@@ -199,18 +242,25 @@ def query_openalex(kw, limit, include_abstract=False):
         "per-page": str(limit),
         "select": fields,
     }
+    if year_from is not None:
+        params["filter"] = f"publication_year:>={year_from}"
     api_key = os.environ.get("OPENALEX_API_KEY", "").strip()
     if api_key:
         params["api_key"] = api_key
     url = "https://api.openalex.org/works?" + urllib.parse.urlencode(params)
     data = json.loads(fetch(url))
-    return [parse_openalex_item(it, include_abstract) for it in data.get("results", [])]
+    rows = [parse_openalex_item(it, include_abstract) for it in data.get("results", [])]
+    return filter_by_year(rows, year_from)
 
 
-def query_arxiv(kw, limit, include_abstract=False):
-    """查询 arXiv Atom 接口。"""
-    terms = [t for t in re.split(r"\s+", kw.strip()) if t]
-    sq = " AND ".join(f"all:{t}" for t in terms) if len(terms) > 1 else f"all:{kw.strip()}"
+def query_arxiv(kw, limit, include_abstract=False, year_from=None):
+    """查询 arXiv Atom 接口（保留引号短语与显式语法，过滤错误 Feed 条目）。"""
+    kw_clean = kw.strip()
+    if ARXIV_SYNTAX_RE.search(kw_clean):
+        sq = kw_clean
+    else:
+        terms = re.findall(r'"[^"]+"|\S+', kw_clean)
+        sq = " AND ".join(f"all:{t}" for t in terms) if len(terms) > 1 else f"all:{kw_clean}"
     query = urllib.parse.urlencode(
         {
             "search_query": sq,
@@ -224,9 +274,15 @@ def query_arxiv(kw, limit, include_abstract=False):
     root = ET.fromstring(raw)
     ns = {"a": "http://www.w3.org/2005/Atom"}
     out = []
+    error_msgs = []
     for e in root.findall("a:entry", ns):
-        ident = (e.findtext("a:id", "", ns) or "").rsplit("/abs/", 1)[-1]
+        raw_id = e.findtext("a:id", "", ns) or ""
         title = clean_text(e.findtext("a:title", "", ns))
+        if "/api/errors" in raw_id.lower() or title.lower() == "error":
+            err_detail = clean_text(e.findtext("a:summary", "", ns)) or "arXiv API returned Error entry"
+            error_msgs.append(err_detail)
+            continue
+        ident = raw_id.rsplit("/abs/", 1)[-1]
         published = e.findtext("a:published", "", ns) or ""
         all_authors = e.findall("a:author", ns)
         authors = [
@@ -249,10 +305,12 @@ def query_arxiv(kw, limit, include_abstract=False):
         if include_abstract:
             row["abstract"] = clean_text(e.findtext("a:summary", "", ns))
         out.append(row)
-    return out
+    if error_msgs and not out:
+        raise ValueError(error_msgs[0])
+    return filter_by_year(out, year_from)
 
 
-def query_dblp(kw, limit, include_abstract=False):
+def query_dblp(kw, limit, include_abstract=False, year_from=None):
     """查询 DBLP 计算机科学文献接口（免费、无 Key、顶会期刊元数据干净）。"""
     url = (
         "https://dblp.org/search/publ/api?"
@@ -281,27 +339,35 @@ def query_dblp(kw, limit, include_abstract=False):
             ee = ee[0] if ee else ""
         url_val = f"https://doi.org/{doi}" if doi else (ee or info.get("url") or "")
         title = clean_text(info.get("title") or "").rstrip(".")
+        venue = clean_text(info.get("venue") or "")
+        raw_type = info.get("type") or ""
+        if venue.lower() == "corr" or (
+            "informal" in raw_type.lower() and "arxiv" in url_val.lower()
+        ):
+            norm_type = "preprint"
+        else:
+            norm_type = raw_type
         row = {
             "source": "dblp",
             "year": info.get("year") or "",
             "title": title,
             "authors": ", ".join(a for a in authors if a),
             "author_count": len(raw_authors),
-            "journal": clean_text(info.get("venue") or ""),
+            "journal": venue,
             "volume": str(info.get("volume") or ""),
             "issue": str(info.get("number") or ""),
             "page": str(info.get("pages") or ""),
             "id": doi or info.get("key") or "",
             "url": url_val,
-            "type": info.get("type") or "",
+            "type": norm_type,
         }
         if include_abstract:
             row["abstract"] = ""
         out.append(row)
-    return out
+    return filter_by_year(out, year_from)
 
 
-def query_doaj(kw, limit, include_abstract=False):
+def query_doaj(kw, limit, include_abstract=False, year_from=None):
     """查询 DOAJ 开放获取期刊接口（编码斜杠，避免路径破坏）。"""
     url = (
         "https://doaj.org/api/search/articles/"
@@ -335,17 +401,30 @@ def query_doaj(kw, limit, include_abstract=False):
             "page": page,
             "id": doi,
             "url": f"https://doi.org/{doi}" if doi else "",
-            "type": journal,
+            "type": "journal-article",
         }
         if include_abstract:
             row["abstract"] = clean_text(b.get("abstract"))
         out.append(row)
-    return out
+    return filter_by_year(out, year_from)
 
 
-def query_semanticscholar(kw, limit, include_abstract=False):
+def map_s2_type(pub_types, doi, arxiv_id):
+    """将 Semantic Scholar publicationTypes 映射为标准文献类型。"""
+    if not doi and arxiv_id:
+        return "preprint"
+    types_list = [str(t).strip() for t in (pub_types or []) if str(t).strip()]
+    lower_set = {t.lower() for t in types_list}
+    if "journalarticle" in lower_set:
+        return "journal-article"
+    if "conference" in lower_set:
+        return "proceedings-article"
+    return ", ".join(types_list)
+
+
+def query_semanticscholar(kw, limit, include_abstract=False, year_from=None):
     """查询 Semantic Scholar 接口（建议设置 S2_API_KEY，否则极易 429）。"""
-    fields = "title,year,authors,externalIds,venue,citationCount,openAccessPdf"
+    fields = "title,year,authors,externalIds,venue,citationCount,openAccessPdf,publicationTypes"
     if include_abstract:
         fields += ",abstract"
     url = (
@@ -385,16 +464,16 @@ def query_semanticscholar(kw, limit, include_abstract=False):
             "url": url_val,
             "oa_url": oa_pdf,
             "cited_by_count": it.get("citationCount"),
-            "type": "open access" if oa_pdf else "",
+            "type": map_s2_type(it.get("publicationTypes"), doi, arxiv_id),
         }
         if include_abstract:
             row["abstract"] = clean_text(it.get("abstract"))
         out.append(row)
-    return out
+    return filter_by_year(out, year_from)
 
 
 def lookup_by_doi(doi_raw, include_abstract=False):
-    """按 DOI 精准反查 Crossref 与 OpenAlex，合并互补字段。"""
+    """按 DOI 精准反查 Crossref 与 OpenAlex，合并互补字段。404 视为正常无结果。"""
     doi = strip_doi_prefix(doi_raw)
     encoded = urllib.parse.quote(doi, safe="")
     cr_url = f"https://api.crossref.org/works/{encoded}"
@@ -407,12 +486,22 @@ def lookup_by_doi(doi_raw, include_abstract=False):
     errors = []
 
     def _get_cr():
-        data = json.loads(fetch(cr_url))
+        try:
+            data = json.loads(fetch(cr_url))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return []
+            raise
         msg = data.get("message")
         return [parse_crossref_item(msg, include_abstract)] if msg else []
 
     def _get_oa():
-        data = json.loads(fetch(oa_url))
+        try:
+            data = json.loads(fetch(oa_url))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return []
+            raise
         return [parse_openalex_item(data, include_abstract)] if data.get("title") else []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -437,51 +526,97 @@ QUERIES = {
 
 
 def merge_and_dedupe(results):
-    """按归一化 DOI 或（小写标题 + 年份）去重并互补缺失字段，返回 (列表, 合并数)。"""
-    seen = {}
+    """通过 DOI 与 (小写标题, 年份) 双索引去重并互补缺失字段，返回 (列表, 合并数)。"""
+    seen_by_doi = {}
+    seen_by_title = {}
     deduped = []
     merged_count = 0
 
     for row in results:
         doi_key = strip_doi_prefix(row.get("id") or "").lower()
+        has_doi = bool(doi_key and doi_key.startswith("10."))
         title_key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", (row.get("title") or "").lower())
         year_key = str(row.get("year") or "")
-        key = f"doi:{doi_key}" if doi_key and doi_key.startswith("10.") else f"t:{title_key}|{year_key}"
+        t_key = f"t:{title_key}|{year_key}" if title_key else ""
 
-        if key in seen and (doi_key or title_key):
-            existing = seen[key]
+        existing = seen_by_doi.get(doi_key) if has_doi else None
+        if existing is None and t_key:
+            existing = seen_by_title.get(t_key)
+
+        if existing is not None:
             merged_count += 1
             also = existing.setdefault("also_in", [])
             if row["source"] not in also and row["source"] != existing["source"]:
                 also.append(row["source"])
+
+            existing_doi = strip_doi_prefix(existing.get("id") or "").lower()
+            existing_has_doi = bool(existing_doi and existing_doi.startswith("10."))
+            if not existing_has_doi and has_doi:
+                if existing.get("url") and not existing.get("oa_url"):
+                    existing["oa_url"] = existing["url"]
+                existing["id"] = strip_doi_prefix(row.get("id") or "")
+                existing["url"] = row.get("url") or f"https://doi.org/{existing['id']}"
+                seen_by_doi[doi_key] = existing
+            elif row.get("source") == "arxiv" and row.get("url") and not existing.get("oa_url"):
+                existing["oa_url"] = row["url"]
+
             for field in ("authors", "journal", "volume", "issue", "page", "oa_url", "abstract"):
                 if not existing.get(field) and row.get(field):
                     existing[field] = row[field]
+
+            existing_type = (existing.get("type") or "").strip()
+            row_type = (row.get("type") or "").strip()
+            if (not existing_type or existing_type.lower() == "open access") and (
+                row_type and row_type.lower() != "open access"
+            ):
+                existing["type"] = row_type
+
             if not existing.get("author_count") and row.get("author_count"):
                 existing["author_count"] = row["author_count"]
             if existing.get("cited_by_count") is None and row.get("cited_by_count") is not None:
                 existing["cited_by_count"] = row["cited_by_count"]
+
+            if t_key and t_key not in seen_by_title:
+                seen_by_title[t_key] = existing
         else:
             item = dict(row)
-            seen[key] = item
+            if has_doi:
+                seen_by_doi[doi_key] = item
+            if t_key:
+                seen_by_title[t_key] = item
             deduped.append(item)
     return deduped, merged_count
+
+
+def escape_bibtex(text):
+    """转义 BibTeX/LaTeX 常见特殊字符（\\、&、%、#、_）。"""
+    if not text:
+        return ""
+    return BIBTEX_ESCAPE_RE.sub(lambda m: BIBTEX_ESCAPE_MAP[m.group(1)], str(text))
 
 
 def format_bibtex(rows):
     """将结果列表格式化为标准 BibTeX 字符串。"""
     entries = []
     for idx, r in enumerate(rows, 1):
-        first_author = (r.get("authors") or "unknown").split(",")[0].strip().split()[-1]
-        first_author = re.sub(r"[^a-zA-Z0-9]", "", first_author).lower() or "ref"
+        first_seg = (r.get("authors") or "").split(",")[0].strip()
+        tokens = first_seg.split()
+        raw_last = tokens[-1] if tokens else ""
+        first_author = re.sub(r"[^a-zA-Z0-9]", "", raw_last).lower() or "ref"
         year = str(r.get("year") or "nd")
         cite_key = f"{first_author}{year}_{idx}"
 
         rtype = (r.get("type") or "").lower()
+        journal_lower = (r.get("journal") or "").strip().lower()
         if "proceedings" in rtype or "conference" in rtype:
             btype = "inproceedings"
             venue_field = "booktitle"
-        elif r.get("source") == "arxiv" or "preprint" in rtype:
+        elif (
+            r.get("source") == "arxiv"
+            or "preprint" in rtype
+            or "informal" in rtype
+            or journal_lower == "corr"
+        ):
             btype = "misc"
             venue_field = "howpublished"
         elif r.get("journal"):
@@ -493,11 +628,12 @@ def format_bibtex(rows):
 
         lines = [f"@{btype}{{{cite_key},"]
         if r.get("title"):
-            lines.append(f"  title = {{{r['title']}}},")
+            lines.append(f"  title = {{{escape_bibtex(r['title'])}}},")
         if r.get("authors"):
-            lines.append(f"  author = {{{r['authors'].replace(', ', ' and ')}}},")
+            authors_bib = escape_bibtex(r["authors"]).replace(", ", " and ")
+            lines.append(f"  author = {{{authors_bib}}},")
         if r.get("journal"):
-            lines.append(f"  {venue_field} = {{{r['journal']}}},")
+            lines.append(f"  {venue_field} = {{{escape_bibtex(r['journal'])}}},")
         if r.get("year"):
             lines.append(f"  year = {{{r['year']}}},")
         if r.get("volume"):
@@ -517,15 +653,20 @@ def format_bibtex(rows):
     return "\n\n".join(entries)
 
 
-def run_concurrent_queries(wanted, keywords, limit, include_abstract):
+def run_concurrent_queries(wanted, keywords, limit, include_abstract, year_from=None):
     """并发查询所选文献源并保持原有顺序返回 (results, errors)。"""
     results_by_source = {}
     errors = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(wanted)) as pool:
-        future_map = {
-            pool.submit(QUERIES[name], keywords, limit, include_abstract): name
-            for name in wanted
-        }
+        future_map = {}
+        for name in wanted:
+            fn = QUERIES[name]
+            if year_from is not None:
+                fut = pool.submit(fn, keywords, limit, include_abstract, year_from=year_from)
+            else:
+                fut = pool.submit(fn, keywords, limit, include_abstract)
+            future_map[fut] = name
+
         for future in concurrent.futures.as_completed(future_map):
             name = future_map[future]
             try:
@@ -540,11 +681,57 @@ def run_concurrent_queries(wanted, keywords, limit, include_abstract):
     return results, errors
 
 
+def parse_sources_arg(raw_sources):
+    """解析 --sources，忽略大小写并去重，同时返回 (有效源列表, 未知源列表)。"""
+    wanted = []
+    unknown = []
+    for part in raw_sources.split(","):
+        s = part.strip().lower()
+        if not s:
+            continue
+        if s in QUERIES:
+            if s not in wanted:
+                wanted.append(s)
+        else:
+            if s not in unknown:
+                unknown.append(s)
+    return wanted, unknown
+
+
+def emit_arg_error(message, args, warnings=None):
+    """按输出模式安全报告参数错误（退出码 2），保证 --json/--bibtex stdout 契约。"""
+    warnings = warnings or []
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "error": message,
+                    "results": [],
+                    "errors": [],
+                    "warnings": warnings,
+                    "summary": {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    elif args.bibtex:
+        for w in warnings:
+            print(f"警告：{w}", file=sys.stderr)
+        print(message, file=sys.stderr)
+    else:
+        for w in warnings:
+            print(f"警告：{w}")
+        print(message)
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    default_sources = "crossref,openalex,arxiv,dblp,doaj"
+    default_sources = "crossref,openalex,arxiv,dblp"
     if os.environ.get("S2_API_KEY", "").strip():
         default_sources += ",semanticscholar"
 
@@ -557,6 +744,7 @@ def main():
         help="逗号分隔，可选 crossref/openalex/arxiv/dblp/doaj/semanticscholar",
     )
     p.add_argument("--limit", type=int, default=3, help="每个源取几条（1-10），默认 3")
+    p.add_argument("--year-from", type=int, default=None, help="过滤起始发表年份（1900-2100）")
     p.add_argument("--abstract", action="store_true", help="同时提取摘要（默认关闭）")
     p.add_argument("--bibtex", action="store_true", help="以 BibTeX 格式输出")
     p.add_argument("--json", action="store_true", help="输出 JSON")
@@ -564,30 +752,48 @@ def main():
 
     limit = max(1, min(args.limit, 10))
     doi_mode = bool(args.doi.strip())
+    warnings = []
+
+    if args.year_from is not None and not (1900 <= args.year_from <= 2100):
+        emit_arg_error("起始年份非法，--year-from 必须在 1900 到 2100 之间。", args)
+        return 2
 
     if not doi_mode and not args.keywords.strip():
-        print("检索词为空。请提供具体主题或使用 --doi <DOI>。")
+        emit_arg_error("检索词为空。请提供具体主题或使用 --doi <DOI>。", args)
         return 2
 
     if doi_mode:
         wanted = ["crossref", "openalex"]
         raw_results, errors = lookup_by_doi(args.doi.strip(), args.abstract)
     else:
-        wanted = [s.strip() for s in args.sources.split(",") if s.strip() in QUERIES]
+        wanted, unknown = parse_sources_arg(args.sources)
+        if unknown:
+            warnings.append(f"已忽略未知检索源：{', '.join(unknown)}")
         if not wanted:
-            print("没有可用的源，检查 --sources 参数")
+            emit_arg_error("没有可用的源，请检查 --sources 参数。", args, warnings)
             return 2
         raw_results, errors = run_concurrent_queries(
-            wanted, args.keywords.strip(), limit, args.abstract
+            wanted, args.keywords.strip(), limit, args.abstract, year_from=args.year_from
         )
 
     results, merged_count = merge_and_dedupe(raw_results)
     ok_sources = [s for s in wanted if not any(e[0] == s for e in errors)]
 
+    if results:
+        exit_code = 0
+        status_msg = ""
+    elif not ok_sources:
+        exit_code = 3
+        status_msg = "所有源都请求失败（网络或限流），本轮检索未完成，不能当作“没有文献”。"
+    else:
+        exit_code = 1
+        status_msg = "所选源正常返回但均为 0 条结果，可按第三档处理或更换检索词。"
+
     if args.json:
         payload = {
             "results": results,
             "errors": errors,
+            "warnings": warnings,
             "summary": {
                 "wanted_sources": wanted,
                 "ok_sources": ok_sources,
@@ -596,16 +802,26 @@ def main():
                 "merged_duplicates": merged_count,
             },
         }
+        if status_msg:
+            payload["message"] = status_msg
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.bibtex:
+        for w in warnings:
+            print(f"警告：{w}", file=sys.stderr)
         if results:
             print(format_bibtex(results))
+        if status_msg:
+            print(status_msg, file=sys.stderr)
     else:
+        for w in warnings:
+            print(f"警告：{w}")
         for r in results:
             tag = r.get("type") or ""
             also = f" +{'/'.join(r['also_in'])}" if r.get("also_in") else ""
             src_label = f"{r['source']}{also}"
-            print(f"[{src_label}] {r.get('year') or '----'} | {r.get('title', '')[:75]} | {r.get('id') or r.get('url')}")
+            print(
+                f"[{src_label}] {r.get('year') or '----'} | {r.get('title', '')[:75]} | {r.get('id') or r.get('url')}"
+            )
             if r.get("authors"):
                 extra_a = f" (共{r['author_count']}位)" if r.get("author_count", 0) > MAX_AUTHORS else ""
                 print(f"    作者: {r['authors'][:90]}{extra_a}")
@@ -618,20 +834,18 @@ def main():
                 print(f"    摘要: {r['abstract'][:160]}...")
         if results:
             print()
-        print(f"汇总：成功 {len(ok_sources)}/{len(wanted)} 个源，原始命中 {len(raw_results)} 条，去重合并 {merged_count} 条，输出 {len(results)} 条。")
+        print(
+            f"汇总：成功 {len(ok_sources)}/{len(wanted)} 个源，原始命中 {len(raw_results)} 条，去重合并 {merged_count} 条，输出 {len(results)} 条。"
+        )
         if "doaj" in ok_sources and any(r["source"] == "doaj" for r in results):
             print("提示：DOAJ 相关性普遍偏低，使用前请人工核对标题与摘要。")
         if errors:
             err_str = "；".join(f"{s}({msg})" for s, msg in errors)
             print(f"失败源：{err_str}")
+        if status_msg:
+            print(status_msg)
 
-    if not results:
-        if not ok_sources:
-            print("所有源都请求失败（网络或限流），本轮检索未完成，不能当作“没有文献”。")
-            return 3
-        print("所选源正常返回但均为 0 条结果，可按第三档处理或更换检索词。")
-        return 1
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

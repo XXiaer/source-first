@@ -1,6 +1,6 @@
 {
   "skill": "source-first",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "runtime": {
     "python": ">=3.8",
     "third_party_packages": [],
@@ -19,7 +19,7 @@
     {
       "name": "OpenAlex",
       "url": "https://api.openalex.org/works",
-      "required": true,
+      "required": false,
       "auth": "optional_api_key",
       "env_var": "OPENALEX_API_KEY",
       "fallback": "无 Key 共享 IP 额度易 429，降级使用 Crossref / DBLP / arXiv"
@@ -43,7 +43,7 @@
       "url": "https://doaj.org/api/search/articles/",
       "required": false,
       "auth": "none",
-      "fallback": "相关性较低，仅作开放获取期刊补充源"
+      "fallback": "相关性较低，默认关闭，仅按需作开放获取期刊补充源"
     },
     {
       "name": "Semantic Scholar",

@@ -28,4 +28,7 @@ jobs:
       - name: Probe public API endpoints
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+          S2_API_KEY: ${{ secrets.S2_API_KEY }}
         run: python scripts/check_environment.py --strict

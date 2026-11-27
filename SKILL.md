@@ -1,6 +1,6 @@
 ---
 name: source-first
-description: "先有出处（动手之前先找依据）：写综述与课程报告前查真实学术文献、核验参考文献真伪并整理上传的 PDF/课件/论文；做课设、毕设与竞赛前查现成开源实现与选题撞车度，确保每条引用可点击验证、每个推荐贴合环境约束。用于文献综述、研究现状、开题报告、课程/读书笔记整理、参考文献核伪，以及“帮我找几篇论文”“参考文献别瞎编”“整理这几个课件 PDF”“帮我核对参考文献真伪”“这个题目是不是烂大街了”“有没有现成开源能直接用”等场景（literature review, related work, citation verification, capstone project, open-source lookup）。不用于凭空写观点文、代写论文正文或整套业务代码，不访问知网及校内系统。"
+description: "先有出处：动手前先查真实依据。用于：(1) 文献综述、研究现状、开题文献调研；(2) 上传 PDF/课件/论文提炼与课程笔记整理；(3) 参考文献与 DOI 真伪核验；(4) 课设/毕设/竞赛选题查重与 GitHub 开源骨架复用评估（literature review, related work, citation verification, capstone/open-source repo lookup）。不用于观点文、成稿润色、代写论文正文或整套代码。"
 ---
 
 # 先有出处
@@ -66,13 +66,13 @@ description: "先有出处（动手之前先找依据）：写综述与课程报
 - `references/citation-formats.md` — GB/T 7714 与 APA 第 7 版，含接口字段映射
 - `references/output-templates.md` — 两条线的输出模板和填好的例子
 - `references/setup-guide.md` — 可选环境变量与 Token 配置指南
-- `scripts/lookup.py` — 文献线只读并发检索脚本（支持 `--doi` 反查、`--year-from`、`--abstract`、`--bibtex`、双索引去重）
-- `scripts/github_lookup.py` — 项目线只读检索脚本（含 Trees API `src/`/子目录探测、`--readme` 摘要与许可证风险标记）
+- `scripts/lookup.py` — 文献线只读并发检索脚本（支持多 `--doi` 批量反查、`--year-from`、`--abstract`、`--format gbt7714|apa|bibtex`、双索引去重）
+- `scripts/github_lookup.py` — 项目线只读检索脚本（支持关键词搜索与 `--repo` 单仓体检、Trees API `src/` 探测、`--readme` 摘要与许可证风险标记）
 - `scripts/check_environment.py` — 只读环境与接口连通性自检脚本
 
 **按阶段按需加载**：
-- 文献线：检索阶段读 `study.md` + `sources.md`（优先运行 `python <skill_dir>/scripts/lookup.py`）；排版生成阶段再读 `citation-formats.md` + `output-templates.md`。
-- 项目线：检索阶段读 `project.md` + `repos.md`（优先运行 `python <skill_dir>/scripts/github_lookup.py`）；输出阶段再读 `output-templates.md`。
+- 文献线：检索阶段读 `study.md` + `sources.md`（优先运行 `python <skill_dir>/scripts/lookup.py`，可直接生成 `gbt7714`/`apa` 引文）；排版生成阶段再读 `citation-formats.md` + `output-templates.md`。
+- 项目线：检索阶段读 `project.md` + `repos.md`（优先运行 `python <skill_dir>/scripts/github_lookup.py`，给具体仓库链接时加 `--repo` 直查）；输出阶段再读 `output-templates.md`。
 
 ## 交付前自检
 

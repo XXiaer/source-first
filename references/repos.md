@@ -6,6 +6,7 @@
 
 ```bash
 python <skill_dir>/scripts/github_lookup.py "<关键词>" --language <语言> --check-files --readme
+python <skill_dir>/scripts/github_lookup.py --repo "<URL或owner/repo>"   # 用户直接给出单个 GitHub 仓库链接时直查体检
 ```
 
 可一次拿到已过滤 Fork 仓的 GitHub 仓库列表、体积（MB）、许可证及风险分类、`src/` 与关键配置文件探测，以及 README 运行指南和中间件依赖线索（如需包含 Fork 可加 `--include-forks`）。
@@ -64,6 +65,7 @@ https://gitee.com/api/v5/search/repositories?q=springboot  → []
 需要 access_token 才能用，公开调用拿不到数据。所以：
 
 - 有浏览器能力就用网页搜索页
+- 若用户直接给出具体 Gitee 仓库链接，在具备网页抓取或浏览器能力时可直接只读打开该仓库页核对 README、目录与开源协议
 - 没有浏览器但有网页搜索（Web Search）工具时，用 `site:gitee.com <关键词> 毕业设计` 间接检索公开仓库页
 - 两者都没有就跳过 Gitee，用 GitHub 加通用搜索顶上
 - **不要在输出里写“已检索 Gitee”**，没查就是没查

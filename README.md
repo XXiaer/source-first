@@ -3,7 +3,7 @@
 **动手之前先找依据。** 写内容前查真实文献，写代码前查现成实现；每条引用都可点击核验，每个推荐都贴合你的约束，拒绝凭记忆编造。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/XXiaer/source-first/releases)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](https://github.com/XXiaer/source-first/releases)
 
 ---
 
@@ -62,19 +62,21 @@ source-first/
 # 并发检索（默认 crossref,openalex,arxiv,dblp）
 python scripts/lookup.py "retrieval augmented generation" --abstract --json
 
-# 按年份筛选近几年的文献并导出 BibTeX
+# 按年份筛选近几年的文献并导出 BibTeX / GB/T 7714
 python scripts/lookup.py "RAG" --year-from 2023 --limit 3 --bibtex
+python scripts/lookup.py "RAG" --year-from 2023 --limit 3 --format gbt7714
 
-# 按 DOI 精准反查（用于核验已有参考文献）
-python scripts/lookup.py --doi 10.1145/3777378 --json
+# 按单条或多条 DOI 批量精准反查（用于核验已有参考文献）
+python scripts/lookup.py --doi "10.1145/3777378,10.9999/fake" --json
 ```
 
 ### 2. GitHub 仓库检索：`scripts/github_lookup.py`
 
-按课设/毕设适配维度查询 GitHub 仓库（默认过滤 10KB 以下空壳仓与 Fork 仓），支持 Trees API 探测 `src/` 与前后端子目录关键文件、`--readme` 提取运行指南与中间件依赖线索，并标记 `NOASSERTION` 与 Copyleft（GPL/AGPL）许可证风险：
+按课设/毕设适配维度查询 GitHub 仓库（默认过滤 10KB 以下空壳仓与 Fork 仓），支持 Trees API 探测 `src/` 与前后端子目录关键文件、`--readme` 提取运行指南与中间件依赖线索、`--repo` 单仓直查体检，并标记 `NOASSERTION`、`archived` 与 Copyleft（GPL/AGPL）许可证风险：
 
 ```bash
 python scripts/github_lookup.py "图书管理 springboot" --language Java --check-files --readme
+python scripts/github_lookup.py --repo https://github.com/owner/repo --json
 python scripts/github_lookup.py "library management" --pushed-after 2025-01-01 --min-stars 5 --json
 python scripts/github_lookup.py "图书管理" --include-forks --json
 ```

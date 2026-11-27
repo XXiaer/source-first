@@ -15,7 +15,7 @@
 
 ## 检索
 
-按 `references/repos.md` 的方法查。最少覆盖两个来源（有浏览器能力时补足第三个）：
+按 `references/repos.md` 的方法查。若用户直接给出某个候选 GitHub 仓库链接询问“能不能用/怎么改”或需核验真伪，直接运行 `python <skill_dir>/scripts/github_lookup.py --repo "<URL或owner/repo>"` 一次拿齐体积、许可证风险、归档状态、`src/` 结构与 README 中间件线索。做选题检索与查重时，最少覆盖两个来源（有浏览器能力时补足第三个）：
 
 1. **GitHub** — 有接口，中文关键词也能搜
 2. **通用搜索** — 用「题目 + 毕业设计 + 源码」这类组合，或 `site:gitee.com <题目> 毕业设计`

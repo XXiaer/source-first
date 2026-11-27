@@ -1,16 +1,17 @@
-"""项目线辅助：只读查询 GitHub 仓库并按课设适配维度整理字段。
+"""项目线辅助：只读查询 GitHub 仓库或直查单个仓库并按课设适配维度整理字段。
 
 用法：
     python github_lookup.py "图书管理 springboot" --language Java
     python github_lookup.py "library management" --pushed-after 2025-01-01 --min-stars 5
     python github_lookup.py "图书管理" --check-files --readme --json
     python github_lookup.py "图书管理" --include-forks
+    python github_lookup.py --repo https://github.com/owner/repo --json
 
 只读。不写文件、不读凭据文件、不起子进程。
 退出码：
     0  成功找到仓库
-    1  正常返回但无结果
-    2  参数错误（如检索词为空）
+    1  正常返回但无结果（含单仓 404）
+    2  参数错误（如检索词为空或仓库标识非法）
     3  请求失败（如触发 403/429 限流或网络异常）
 """
 
@@ -24,8 +25,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-UA = "source-first-github-lookup/1.4 (read-only)"
+UA = "source-first-github-lookup/1.5 (read-only)"
 TIMEOUT = 20
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 KEY_FILENAMES = {
     "readme.md",
@@ -214,6 +216,104 @@ def fetch_repo_readme(full_name):
     }
 
 
+def normalize_repo_item(repo):
+    """将 GitHub 仓库 JSON 规范化为课设适配字典。"""
+    lic_label, lic_risk = classify_license(repo.get("license"))
+    size_kb = repo.get("size") or 0
+    return {
+        "full_name": repo.get("full_name") or "",
+        "default_branch": repo.get("default_branch") or "main",
+        "url": repo.get("html_url") or "",
+        "description": (repo.get("description") or "").strip(),
+        "language": repo.get("language") or "未知",
+        "stars": repo.get("stargazers_count") or 0,
+        "pushed_at": (repo.get("pushed_at") or "")[:10],
+        "size_kb": size_kb,
+        "size_mb": round(size_kb / 1024, 2),
+        "too_small": size_kb < 100,
+        "oversize": size_kb > 51200,
+        "archived": bool(repo.get("archived")),
+        "fork": bool(repo.get("fork")),
+        "license": lic_label,
+        "license_risk": lic_risk,
+    }
+
+
+def enrich_repo_items(items, check_files, fetch_readme, check_limit):
+    """串行探测候选仓库的关键文件与 README，触发 403/429 时立即熔断。"""
+    if not ((check_files or fetch_readme) and items):
+        return
+    targets = items[: max(1, min(check_limit, 5))]
+    for row in targets:
+        rate_limited = False
+        if check_files:
+            try:
+                row["key_files"] = inspect_repo_files(row["full_name"], row["default_branch"])
+            except urllib.error.HTTPError as exc:
+                if is_rate_limit_error(exc):
+                    row["key_files_error"] = f"HTTP {exc.code} 限流，已熔断后续检查"
+                    rate_limited = True
+                else:
+                    row["key_files_error"] = f"HTTP {exc.code}"
+            except Exception as exc:
+                row["key_files_error"] = f"{type(exc).__name__}: {exc}"
+        if rate_limited:
+            break
+
+        if fetch_readme:
+            try:
+                row.update(fetch_repo_readme(row["full_name"]))
+            except urllib.error.HTTPError as exc:
+                if is_rate_limit_error(exc):
+                    row["readme_error"] = f"HTTP {exc.code} 限流，已熔断后续检查"
+                    rate_limited = True
+                else:
+                    row["readme_error"] = f"HTTP {exc.code}"
+            except Exception as exc:
+                row["readme_error"] = f"{type(exc).__name__}: {exc}"
+        if rate_limited:
+            break
+
+
+def parse_repo_identifier(raw):
+    """解析 owner/repo 或 GitHub 仓库链接，返回规范化的 'owner/repo'。"""
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("仓库标识为空，请传入 owner/repo 或 GitHub 仓库链接。")
+    s = re.split(r"[?#]", s, maxsplit=1)[0].strip()
+    if s.lower().startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(s)
+        if parsed.netloc.lower() not in ("github.com", "www.github.com"):
+            raise ValueError("仅支持 github.com 仓库链接或 owner/repo。")
+        s = parsed.path
+    elif s.lower().startswith(("github.com/", "www.github.com/")):
+        s = s.split("/", 1)[1]
+    parts = [p for p in s.strip("/").split("/") if p]
+    if len(parts) < 2:
+        raise ValueError("仓库标识格式非法，请传入 owner/repo 或 GitHub 仓库链接。")
+    owner, repo = parts[0], parts[1]
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+    full_name = f"{owner}/{repo}"
+    if not REPO_NAME_RE.match(full_name):
+        raise ValueError("仓库标识格式非法，请传入 owner/repo 或 GitHub 仓库链接。")
+    return full_name
+
+
+def inspect_single_repo(full_name, check_files=True, fetch_readme=True):
+    """直接体检单个 GitHub 仓库；404 返回 (0, [])，其余异常上抛。"""
+    url = f"https://api.github.com/repos/{full_name}"
+    try:
+        repo = fetch_json(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return 0, []
+        raise
+    items = [normalize_repo_item(repo)]
+    enrich_repo_items(items, check_files, fetch_readme, check_limit=1)
+    return 1, items
+
+
 def search_repos(
     keywords,
     language,
@@ -256,61 +356,8 @@ def search_repos(
     )
     data = fetch_json(url)
     total = data.get("total_count", 0)
-    items = []
-    raw_items = data.get("items", [])
-    for repo in raw_items:
-        lic_label, lic_risk = classify_license(repo.get("license"))
-        size_kb = repo.get("size") or 0
-        items.append(
-            {
-                "full_name": repo.get("full_name") or "",
-                "default_branch": repo.get("default_branch") or "main",
-                "url": repo.get("html_url") or "",
-                "description": (repo.get("description") or "").strip(),
-                "language": repo.get("language") or "未知",
-                "stars": repo.get("stargazers_count") or 0,
-                "pushed_at": (repo.get("pushed_at") or "")[:10],
-                "size_kb": size_kb,
-                "size_mb": round(size_kb / 1024, 2),
-                "too_small": size_kb < 100,
-                "oversize": size_kb > 51200,
-                "license": lic_label,
-                "license_risk": lic_risk,
-            }
-        )
-
-    if (check_files or fetch_readme) and items:
-        targets = items[: max(1, min(check_limit, 5))]
-        for row in targets:
-            rate_limited = False
-            if check_files:
-                try:
-                    row["key_files"] = inspect_repo_files(row["full_name"], row["default_branch"])
-                except urllib.error.HTTPError as exc:
-                    if is_rate_limit_error(exc):
-                        row["key_files_error"] = f"HTTP {exc.code} 限流，已熔断后续检查"
-                        rate_limited = True
-                    else:
-                        row["key_files_error"] = f"HTTP {exc.code}"
-                except Exception as exc:
-                    row["key_files_error"] = f"{type(exc).__name__}: {exc}"
-            if rate_limited:
-                break
-
-            if fetch_readme:
-                try:
-                    row.update(fetch_repo_readme(row["full_name"]))
-                except urllib.error.HTTPError as exc:
-                    if is_rate_limit_error(exc):
-                        row["readme_error"] = f"HTTP {exc.code} 限流，已熔断后续检查"
-                        rate_limited = True
-                    else:
-                        row["readme_error"] = f"HTTP {exc.code}"
-                except Exception as exc:
-                    row["readme_error"] = f"{type(exc).__name__}: {exc}"
-            if rate_limited:
-                break
-
+    items = [normalize_repo_item(repo) for repo in data.get("items", [])]
+    enrich_repo_items(items, check_files, fetch_readme, check_limit)
     return total, items
 
 
@@ -340,7 +387,12 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     p = argparse.ArgumentParser(description="查询 GitHub 仓库并输出课设适配信息")
-    p.add_argument("keywords", nargs="?", default="", help="检索词，如 '图书管理 springboot'")
+    p.add_argument("keywords", nargs="?", default="", help="检索词，如 '图书管理 springboot'（--repo 模式下可省略）")
+    p.add_argument(
+        "--repo",
+        default="",
+        help="直接体检单个 GitHub 仓库（支持 owner/repo 或完整 GitHub URL，自动探测关键文件与 README）",
+    )
     p.add_argument("--language", default="", help="限定主语言，如 Java / Python / Vue")
     p.add_argument("--pushed-after", default="", help="限定最近提交日期，如 2025-01-01")
     p.add_argument("--min-size", type=int, default=10, help="最小仓库体积（KB，默认 10 过滤空壳仓，传 0 关闭）")
@@ -354,29 +406,41 @@ def main():
     p.add_argument("--json", action="store_true", help="输出 JSON")
     args = p.parse_args()
 
-    if not args.keywords.strip():
-        emit_error("检索词为空。请给一个具体题目或技术关键词再查。", args)
+    repo_mode = bool(args.repo.strip())
+    if not repo_mode and not args.keywords.strip():
+        emit_error("检索词为空。请给一个具体题目、技术关键词或使用 --repo <owner/repo>。", args)
         return 2
+
+    target_repo = ""
+    if repo_mode:
+        try:
+            target_repo = parse_repo_identifier(args.repo)
+        except ValueError as exc:
+            emit_error(str(exc), args)
+            return 2
 
     limit = max(1, min(args.limit, 10))
     try:
-        total, items = search_repos(
-            args.keywords,
-            args.language,
-            args.pushed_after,
-            max(0, args.min_size),
-            max(0, args.min_stars),
-            args.sort,
-            limit,
-            args.check_files,
-            args.check_limit,
-            include_forks=args.include_forks,
-            fetch_readme=args.readme,
-        )
+        if repo_mode:
+            total, items = inspect_single_repo(target_repo, check_files=True, fetch_readme=True)
+        else:
+            total, items = search_repos(
+                args.keywords,
+                args.language,
+                args.pushed_after,
+                max(0, args.min_size),
+                max(0, args.min_stars),
+                args.sort,
+                limit,
+                args.check_files,
+                args.check_limit,
+                include_forks=args.include_forks,
+                fetch_readme=args.readme,
+            )
     except urllib.error.HTTPError as exc:
         body = read_http_error_body(exc)
         if is_rate_limit_error(exc, body):
-            kw_q = args.keywords.strip()
+            kw_q = target_repo if repo_mode else args.keywords.strip()
             emit_error(
                 f"GitHub API 触发限流（HTTP {exc.code} rate limit exceeded），请停止重试。",
                 args,
@@ -389,15 +453,31 @@ def main():
         emit_error(f"请求失败：{type(exc).__name__}: {exc}", args)
         return 3
 
+    not_found_msg = (
+        "未找到目标 GitHub 仓库（HTTP 404），请核对链接真伪或是否为私有仓库。"
+        if repo_mode and not items
+        else ""
+    )
+
     if args.json:
-        print(json.dumps({"total_count": total, "items": items}, ensure_ascii=False, indent=2))
+        payload = {"total_count": total, "items": items}
+        if not_found_msg:
+            payload["message"] = not_found_msg
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print(f"命中总数：{total}（展示前 {len(items)} 条）")
+        if not_found_msg:
+            print(not_found_msg)
+        else:
+            print(f"命中总数：{total}（展示前 {len(items)} 条）")
         if total > 10000:
             print("提示：关键词过宽（命中超 1 万条），建议补充技术栈或核心业务词缩小范围。")
         print()
         for it in items:
             flags = []
+            if it.get("archived"):
+                flags.append("[已归档-不建议直接用]")
+            if it.get("fork"):
+                flags.append("[Fork仓]")
             if it["oversize"]:
                 flags.append("[体积>50MB]")
             elif it["too_small"]:

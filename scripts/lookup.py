@@ -1,10 +1,12 @@
-"""一次并发查多个文献源，去重合并并支持 DOI 精准反查与 BibTeX 导出。
+"""一次并发查多个文献源，去重合并并支持多 DOI 精准反查与多格式引文导出。
 
 用法：
     python lookup.py "retrieval augmented generation"
     python lookup.py "图书管理" --sources crossref,openalex,dblp
     python lookup.py --doi 10.1145/3777378 --json
+    python lookup.py --doi "10.1145/3777378,10.9999/fake" --json
     python lookup.py "RAG" --limit 3 --year-from 2023 --abstract --json
+    python lookup.py "RAG" --limit 3 --format gbt7714
     python lookup.py "RAG" --limit 3 --bibtex
 
 可选环境变量：
@@ -16,7 +18,7 @@
 退出码：
     0  至少一个源返回有效结果
     1  所选源正常返回但均为 0 条结果
-    2  参数错误（如关键词为空、年份范围非法或无可用源）
+    2  参数错误（如关键词为空、年份范围非法、输出格式冲突或无可用源）
     3  所有请求的源全部失败（网络/限流），不可当作“无文献”
 """
 
@@ -54,8 +56,8 @@ def build_user_agent():
     """构造请求头 User-Agent，如设置了 CROSSREF_MAILTO 则附加礼貌池信息。"""
     mailto = os.environ.get("CROSSREF_MAILTO", "").strip()
     if mailto:
-        return f"source-first-lookup/1.4 (academic citation lookup; mailto:{mailto})"
-    return "source-first-lookup/1.4 (academic citation lookup; read-only)"
+        return f"source-first-lookup/1.5 (academic citation lookup; mailto:{mailto})"
+    return "source-first-lookup/1.5 (academic citation lookup; read-only)"
 
 
 def fetch(url, extra_headers=None):
@@ -515,6 +517,95 @@ def lookup_by_doi(doi_raw, include_abstract=False):
     return results, errors
 
 
+def parse_doi_args(raw_doi_list):
+    """解析 --doi 参数列表（支持逗号/空白分隔与重复传参），剥离前缀并保序去重。"""
+    seen = set()
+    dois = []
+    for item in raw_doi_list or []:
+        for part in re.split(r"[\s,]+", item.strip()):
+            cleaned = strip_doi_prefix(part)
+            if cleaned and cleaned.lower() not in seen:
+                seen.add(cleaned.lower())
+                dois.append(cleaned)
+    return dois
+
+
+def lookup_multiple_dois(doi_list, include_abstract=False):
+    """按单条或多条 DOI 并发反查 Crossref 与 OpenAlex，返回 (raw_results, errors, ok_sources, doi_checks)。"""
+    if len(doi_list) == 1:
+        per_doi = [(doi_list[0], *lookup_by_doi(doi_list[0], include_abstract))]
+    else:
+        per_doi_map = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(doi_list))) as pool:
+            futs = {
+                pool.submit(lookup_by_doi, d, include_abstract): d
+                for d in doi_list
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                d = futs[fut]
+                per_doi_map[d] = fut.result()
+        per_doi = [(d, *per_doi_map[d]) for d in doi_list]
+
+    raw_results = []
+    all_errors = []
+    seen_errors = set()
+    source_had_ok = {"crossref": False, "openalex": False}
+    doi_checks = []
+
+    for doi, sub_raw, sub_errors in per_doi:
+        raw_results.extend(sub_raw)
+        err_sources = {s for s, _ in sub_errors}
+        for src in ("crossref", "openalex"):
+            if src not in err_sources:
+                source_had_ok[src] = True
+        for err_item in sub_errors:
+            if err_item not in seen_errors:
+                seen_errors.add(err_item)
+                all_errors.append(err_item)
+
+        sub_deduped, _ = merge_and_dedupe(sub_raw)
+        if sub_deduped:
+            rec = sub_deduped[0]
+            doi_checks.append(
+                {
+                    "query_doi": doi,
+                    "status": "found",
+                    "title": rec.get("title", ""),
+                    "year": rec.get("year"),
+                    "authors": rec.get("authors", ""),
+                    "url": rec.get("url", ""),
+                    "errors": sub_errors,
+                }
+            )
+        elif len(sub_errors) < 2:
+            doi_checks.append(
+                {
+                    "query_doi": doi,
+                    "status": "not_found",
+                    "title": "",
+                    "year": None,
+                    "authors": "",
+                    "url": "",
+                    "errors": sub_errors,
+                }
+            )
+        else:
+            doi_checks.append(
+                {
+                    "query_doi": doi,
+                    "status": "error",
+                    "title": "",
+                    "year": None,
+                    "authors": "",
+                    "url": "",
+                    "errors": sub_errors,
+                }
+            )
+
+    ok_sources = [s for s in ("crossref", "openalex") if source_had_ok[s]]
+    return raw_results, all_errors, ok_sources, doi_checks
+
+
 QUERIES = {
     "crossref": query_crossref,
     "openalex": query_openalex,
@@ -653,6 +744,179 @@ def format_bibtex(rows):
     return "\n\n".join(entries)
 
 
+def split_authors(authors_str):
+    """按 ', ' 拆分作者字符串并过滤空项。"""
+    return [a.strip() for a in (authors_str or "").split(",") if a.strip()]
+
+
+def _is_preprint_row(r):
+    """判断记录是否属于预印本（arXiv、DBLP CoRR 等）。"""
+    rtype = (r.get("type") or "").lower()
+    j_low = (r.get("journal") or "").strip().lower()
+    return (
+        r.get("source") == "arxiv"
+        or "preprint" in rtype
+        or "informal" in rtype
+        or j_low == "corr"
+        or j_low.startswith("arxiv")
+    )
+
+
+def _format_gbt7714_author(name):
+    """按 GB/T 7714-2015 转换单名作者：中文保留，西文转为 'Surname I I'（不加点）。"""
+    if CJK_RE.search(name):
+        return name
+    parts = name.split()
+    if len(parts) <= 1:
+        return name
+    surname = parts[-1]
+    initials = []
+    for p in parts[:-1]:
+        for sub in re.split(r"[\s.-]+", p):
+            if sub:
+                initials.append(sub[0].upper())
+    return f"{surname} {' '.join(initials)}" if initials else surname
+
+
+def format_gbt7714_entry(r, idx):
+    """将单条规范化记录格式化为 GB/T 7714-2015 引文。"""
+    author_list = split_authors(r.get("authors"))
+    total_n = max(len(author_list), r.get("author_count") or 0)
+    shown = [_format_gbt7714_author(a) for a in author_list[:3]]
+    has_cjk = bool((author_list and CJK_RE.search(author_list[0])) or CJK_RE.search(r.get("title") or ""))
+    authors_str = ", ".join(shown)
+    if total_n > 3 and authors_str:
+        authors_str += ", 等" if has_cjk else ", et al."
+    if not authors_str:
+        authors_prefix = ""
+    elif authors_str.endswith("."):
+        authors_prefix = f"{authors_str} "
+    else:
+        authors_prefix = f"{authors_str}. "
+
+    title = r.get("title") or ""
+    year = str(r.get("year") or "").strip()
+    journal = (r.get("journal") or "").strip()
+    vol = str(r.get("volume") or "").strip()
+    iss = str(r.get("issue") or "").strip()
+    page = str(r.get("page") or "").strip()
+    rtype = (r.get("type") or "").lower()
+
+    is_preprint = _is_preprint_row(r)
+    is_conf = (not is_preprint) and ("proceedings" in rtype or "conference" in rtype)
+    doi = strip_doi_prefix(r.get("id") or "")
+    link = f"https://doi.org/{doi}" if doi.startswith("10.") else (r.get("url") or "")
+
+    if is_preprint or (not is_conf and not journal):
+        out = f"[{idx}] {authors_prefix}{title}[EB/OL]."
+        if year:
+            out += f" ({year})."
+        if link:
+            out += f" {link}."
+        if is_preprint:
+            out += " （预印本，未经同行评审）"
+        return out
+
+    if is_conf:
+        venue = journal or "Proceedings"
+        out = f"[{idx}] {authors_prefix}{title}[C]//{venue}"
+        if year:
+            out += f", {year}"
+        if page:
+            out += f": {page}"
+        out += "."
+        if link:
+            out += f" {link}"
+        return out
+
+    vol_issue = f"{vol}({iss})" if (vol and iss) else (vol if vol else (f"({iss})" if iss else ""))
+    pub_parts = [x for x in (journal, year, vol_issue) if x]
+    pub_seg = ", ".join(pub_parts)
+    if page:
+        pub_seg += f": {page}"
+    out = f"[{idx}] {authors_prefix}{title}[J]. {pub_seg}."
+    if link:
+        out += f" {link}"
+    return out
+
+
+def format_gbt7714(rows):
+    """将结果列表格式化为 GB/T 7714-2015 参考文献表。"""
+    return "\n".join(format_gbt7714_entry(r, idx) for idx, r in enumerate(rows, 1))
+
+
+def _format_apa_author(name):
+    """按 APA 第 7 版转换单名作者：中文保留，西文转为 'Surname, I. I.'（带缩写点）。"""
+    if CJK_RE.search(name):
+        return name
+    parts = name.split()
+    if len(parts) <= 1:
+        return name
+    surname = parts[-1]
+    initials = []
+    for p in parts[:-1]:
+        for sub in re.split(r"[\s.-]+", p):
+            if sub:
+                initials.append(f"{sub[0].upper()}.")
+    return f"{surname}, {' '.join(initials)}" if initials else surname
+
+
+def format_apa_entry(r):
+    """将单条规范化记录格式化为 APA 第 7 版引文。"""
+    author_list = split_authors(r.get("authors"))
+    total_n = max(len(author_list), r.get("author_count") or 0)
+    formatted = [_format_apa_author(a) for a in author_list[:20]]
+    if not formatted:
+        authors_part = ""
+    elif len(formatted) == 1:
+        authors_part = f"{formatted[0]} "
+    elif total_n > 20 and len(formatted) >= 20:
+        authors_part = f"{', '.join(formatted[:19])}, ... {formatted[19]} "
+    else:
+        authors_part = f"{', '.join(formatted[:-1])}, & {formatted[-1]} "
+
+    year = str(r.get("year") or "").strip()
+    year_part = f"({year})." if year else "(n.d.)."
+    title = r.get("title") or ""
+    journal = (r.get("journal") or "").strip()
+    vol = str(r.get("volume") or "").strip()
+    iss = str(r.get("issue") or "").strip()
+    page = str(r.get("page") or "").strip()
+    doi = strip_doi_prefix(r.get("id") or "")
+    link = f"https://doi.org/{doi}" if doi.startswith("10.") else (r.get("url") or "")
+
+    if _is_preprint_row(r):
+        venue = journal or "arXiv"
+        out = f"{authors_part}{year_part} {title} [Preprint]. {venue}."
+        if link:
+            out += f" {link}"
+        return out
+
+    out = f"{authors_part}{year_part} {title}."
+    pub_segs = []
+    if journal:
+        pub_segs.append(f"*{journal}*")
+    if vol:
+        v_str = f"*{vol}*"
+        if iss:
+            v_str += f"({iss})"
+        pub_segs.append(v_str)
+    elif iss:
+        pub_segs.append(f"({iss})")
+    if page:
+        pub_segs.append(page)
+    if pub_segs:
+        out += f" {', '.join(pub_segs)}."
+    if link:
+        out += f" {link}"
+    return out
+
+
+def format_apa(rows):
+    """将结果列表格式化为 APA 第 7 版参考文献表。"""
+    return "\n".join(format_apa_entry(r) for r in rows)
+
+
 def run_concurrent_queries(wanted, keywords, limit, include_abstract, year_from=None):
     """并发查询所选文献源并保持原有顺序返回 (results, errors)。"""
     results_by_source = {}
@@ -698,10 +962,10 @@ def parse_sources_arg(raw_sources):
     return wanted, unknown
 
 
-def emit_arg_error(message, args, warnings=None):
-    """按输出模式安全报告参数错误（退出码 2），保证 --json/--bibtex stdout 契约。"""
+def emit_arg_error(message, out_fmt, warnings=None):
+    """按输出模式安全报告参数错误（退出码 2），保证 --json/--bibtex/--format stdout 契约。"""
     warnings = warnings or []
-    if args.json:
+    if out_fmt == "json":
         print(
             json.dumps(
                 {
@@ -715,7 +979,7 @@ def emit_arg_error(message, args, warnings=None):
                 indent=2,
             )
         )
-    elif args.bibtex:
+    elif out_fmt in ("bibtex", "gbt7714", "apa"):
         for w in warnings:
             print(f"警告：{w}", file=sys.stderr)
         print(message, file=sys.stderr)
@@ -723,6 +987,20 @@ def emit_arg_error(message, args, warnings=None):
         for w in warnings:
             print(f"警告：{w}")
         print(message)
+
+
+def resolve_output_format(args):
+    """解析并校验输出格式冲突，返回 (out_fmt, conflict_msg)。"""
+    chosen = []
+    if args.json:
+        chosen.append("json")
+    if args.bibtex:
+        chosen.append("bibtex")
+    if args.format and args.format not in chosen:
+        chosen.append(args.format)
+    if len(chosen) > 1:
+        return ("json" if "json" in chosen else chosen[0]), f"输出格式参数冲突：{', '.join(chosen)} 不能同时使用。"
+    return (chosen[0] if chosen else "text"), ""
 
 
 def main():
@@ -737,7 +1015,12 @@ def main():
 
     p = argparse.ArgumentParser(description="一次并发查多个文献源，合并去重输出")
     p.add_argument("keywords", nargs="?", default="", help="检索词，中英文都可（--doi 模式下可省略）")
-    p.add_argument("--doi", default="", help="按 DOI 精准反查（如 10.1145/3777378）")
+    p.add_argument(
+        "--doi",
+        action="append",
+        default=[],
+        help="按 DOI 精准反查（支持单个、逗号分隔多个或重复传参）",
+    )
     p.add_argument(
         "--sources",
         default=default_sources,
@@ -748,36 +1031,49 @@ def main():
     p.add_argument("--abstract", action="store_true", help="同时提取摘要（默认关闭）")
     p.add_argument("--bibtex", action="store_true", help="以 BibTeX 格式输出")
     p.add_argument("--json", action="store_true", help="输出 JSON")
+    p.add_argument(
+        "--format",
+        choices=["text", "json", "bibtex", "gbt7714", "apa"],
+        default=None,
+        help="指定输出格式（text / json / bibtex / gbt7714 / apa）",
+    )
     args = p.parse_args()
 
+    out_fmt, conflict_msg = resolve_output_format(args)
+    if conflict_msg:
+        emit_arg_error(conflict_msg, out_fmt)
+        return 2
+
     limit = max(1, min(args.limit, 10))
-    doi_mode = bool(args.doi.strip())
+    doi_list = parse_doi_args(args.doi)
+    doi_mode = bool(doi_list)
     warnings = []
 
     if args.year_from is not None and not (1900 <= args.year_from <= 2100):
-        emit_arg_error("起始年份非法，--year-from 必须在 1900 到 2100 之间。", args)
+        emit_arg_error("起始年份非法，--year-from 必须在 1900 到 2100 之间。", out_fmt)
         return 2
 
     if not doi_mode and not args.keywords.strip():
-        emit_arg_error("检索词为空。请提供具体主题或使用 --doi <DOI>。", args)
+        emit_arg_error("检索词为空。请提供具体主题或使用 --doi <DOI>。", out_fmt)
         return 2
 
+    doi_checks = []
     if doi_mode:
         wanted = ["crossref", "openalex"]
-        raw_results, errors = lookup_by_doi(args.doi.strip(), args.abstract)
+        raw_results, errors, ok_sources, doi_checks = lookup_multiple_dois(doi_list, args.abstract)
     else:
         wanted, unknown = parse_sources_arg(args.sources)
         if unknown:
             warnings.append(f"已忽略未知检索源：{', '.join(unknown)}")
         if not wanted:
-            emit_arg_error("没有可用的源，请检查 --sources 参数。", args, warnings)
+            emit_arg_error("没有可用的源，请检查 --sources 参数。", out_fmt, warnings)
             return 2
         raw_results, errors = run_concurrent_queries(
             wanted, args.keywords.strip(), limit, args.abstract, year_from=args.year_from
         )
+        ok_sources = [s for s in wanted if not any(e[0] == s for e in errors)]
 
     results, merged_count = merge_and_dedupe(raw_results)
-    ok_sources = [s for s in wanted if not any(e[0] == s for e in errors)]
 
     if results:
         exit_code = 0
@@ -789,9 +1085,15 @@ def main():
         exit_code = 1
         status_msg = "所选源正常返回但均为 0 条结果，可按第三档处理或更换检索词。"
 
-    if args.json:
+    if out_fmt == "json":
+        enriched_results = []
+        for idx, r in enumerate(results, 1):
+            item = dict(r)
+            item["citation_gbt7714"] = format_gbt7714_entry(r, idx)
+            item["citation_apa"] = format_apa_entry(r)
+            enriched_results.append(item)
         payload = {
-            "results": results,
+            "results": enriched_results,
             "errors": errors,
             "warnings": warnings,
             "summary": {
@@ -802,19 +1104,36 @@ def main():
                 "merged_duplicates": merged_count,
             },
         }
+        if doi_mode:
+            payload["doi_checks"] = doi_checks
         if status_msg:
             payload["message"] = status_msg
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-    elif args.bibtex:
+    elif out_fmt in ("bibtex", "gbt7714", "apa"):
         for w in warnings:
             print(f"警告：{w}", file=sys.stderr)
         if results:
-            print(format_bibtex(results))
+            if out_fmt == "bibtex":
+                print(format_bibtex(results))
+            elif out_fmt == "gbt7714":
+                print(format_gbt7714(results))
+            else:
+                print(format_apa(results))
         if status_msg:
             print(status_msg, file=sys.stderr)
     else:
         for w in warnings:
             print(f"警告：{w}")
+        if doi_mode and len(doi_checks) > 1:
+            print("批量 DOI 核验结果：")
+            for chk in doi_checks:
+                if chk["status"] == "found":
+                    print(f"  [找到] {chk['query_doi']} -> {chk['title']} ({chk['year'] or '----'})")
+                elif chk["status"] == "not_found":
+                    print(f"  [未找到] {chk['query_doi']}（源正常返回 404）")
+                else:
+                    print(f"  [请求失败] {chk['query_doi']}")
+            print()
         for r in results:
             tag = r.get("type") or ""
             also = f" +{'/'.join(r['also_in'])}" if r.get("also_in") else ""

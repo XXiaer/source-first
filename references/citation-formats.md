@@ -2,6 +2,8 @@
 
 两份格式，按用户要求选。没要求时，中文论文用 GB/T 7714，英文论文用 APA 第 7 版。
 
+> **优先用脚本确定性生成**：`scripts/lookup.py` 已内置 `--format gbt7714`、`--format apa`、`--bibtex` 格式化输出（`--json` 模式亦自带 `citation_gbt7714` 与 `citation_apa` 字段）。下方字段映射与格式规则用于无 Python 环境降级手拼或人工核校。
+
 所有字段都从接口返回里取，不手打。注：`scripts/lookup.py` 已自动将 Crossref 西文作者统一成 `Given Family` 顺序，与 OpenAlex、arXiv、DBLP、DOAJ、Semantic Scholar 保持一致，格式化 GB/T 7714 时请按“姓前名缩写后”规则转换。
 
 ## 接口字段映射

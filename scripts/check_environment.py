@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 
 TIMEOUT = 15
-UA = "source-first-healthcheck/1.4 (read-only)"
+UA = "source-first-healthcheck/1.5 (read-only)"
 
 ENV_VARS = [
     ("GITHUB_TOKEN", "强烈建议（提升 GitHub API 额度至 5000 次/小时）"),
@@ -71,7 +71,7 @@ def probe_endpoint(name, url, required):
     if name == "Crossref":
         mailto = os.environ.get("CROSSREF_MAILTO", "").strip()
         if mailto:
-            headers["User-Agent"] = f"source-first-healthcheck/1.4 (mailto:{mailto})"
+            headers["User-Agent"] = f"source-first-healthcheck/1.5 (mailto:{mailto})"
     elif name == "OpenAlex":
         oa_key = os.environ.get("OPENALEX_API_KEY", "").strip()
         if oa_key:

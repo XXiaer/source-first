@@ -167,6 +167,66 @@ class TestLookupHelpers(unittest.TestCase):
         self.assertIn("@misc{ref2025_2,", bib)
         self.assertIn("howpublished = {CoRR}", bib)
 
+    def test_format_gbt7714_and_apa_citations(self):
+        rows = [
+            {
+                "source": "crossref",
+                "year": 2025,
+                "title": "基于知识图谱的推荐系统研究",
+                "authors": "张三, 李四, 王五, 赵六",
+                "author_count": 4,
+                "journal": "软件学报",
+                "volume": "36",
+                "issue": "",
+                "page": "100-115",
+                "id": "10.13328/j.cnki.jos.0001",
+                "url": "https://doi.org/10.13328/j.cnki.jos.0001",
+                "type": "journal-article",
+            },
+            {
+                "source": "dblp",
+                "year": "2024",
+                "title": "Graph RAG Survey",
+                "authors": "John A. Smith, Bob Brown, Carol Lee, Dave Kim",
+                "author_count": 4,
+                "journal": "NeurIPS",
+                "volume": "",
+                "issue": "",
+                "page": "1-12",
+                "id": "10.5555/12345",
+                "url": "https://doi.org/10.5555/12345",
+                "type": "proceedings-article",
+            },
+            {
+                "source": "arxiv",
+                "year": "2025",
+                "title": "Preprint Study",
+                "authors": "Alice Wang",
+                "author_count": 1,
+                "journal": "arXiv",
+                "volume": "",
+                "issue": "",
+                "page": "",
+                "id": "2501.00001",
+                "url": "https://arxiv.org/abs/2501.00001",
+                "type": "preprint",
+            },
+        ]
+        gbt = lookup.format_gbt7714(rows)
+        lines = gbt.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("[1] 张三, 李四, 王五, 等. 基于知识图谱的推荐系统研究[J]. 软件学报, 2025, 36: 100-115.", lines[0])
+        self.assertNotIn("()", lines[0])
+        self.assertIn("[2] Smith J A, Brown B, Lee C, et al. Graph RAG Survey[C]//NeurIPS, 2024: 1-12.", lines[1])
+        self.assertIn("[3] Wang A. Preprint Study[EB/OL]. (2025). https://arxiv.org/abs/2501.00001. （预印本，未经同行评审）", lines[2])
+
+        apa = lookup.format_apa(rows)
+        apa_lines = apa.splitlines()
+        self.assertIn("张三, 李四, 王五, & 赵六 (2025).", apa_lines[0])
+        self.assertIn("*软件学报*, *36*, 100-115.", apa_lines[0])
+        self.assertIn("Smith, J. A., Brown, B., Lee, C., & Kim, D. (2024).", apa_lines[1])
+        self.assertIn("Wang, A. (2025). Preprint Study [Preprint]. arXiv. https://arxiv.org/abs/2501.00001", apa_lines[2])
+
 
 class TestLookupQueriesAndCLI(unittest.TestCase):
     """测试各源解析、类型规范化、年份过滤、DOI 404 与 CLI 输出契约。"""
@@ -413,6 +473,89 @@ class TestLookupQueriesAndCLI(unittest.TestCase):
         self.assertEqual(out_buf.getvalue().strip(), "")
         self.assertIn("0 条结果", err_buf.getvalue())
 
+    def test_batch_doi_lookup_mixed_found_and_404(self):
+        cr_ok = json.dumps(
+            {
+                "message": {
+                    "title": ["Valid Paper"],
+                    "author": [{"family": "Peng", "given": "Boci"}],
+                    "issued": {"date-parts": [[2025]]},
+                    "DOI": "10.1145/3777378",
+                    "container-title": ["ACM TOIS"],
+                    "type": "journal-article",
+                }
+            }
+        ).encode("utf-8")
+
+        def fake_fetch(url, extra_headers=None):
+            if "10.1145%2F3777378" in url and "crossref.org" in url:
+                return cr_ok
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+
+        buf = io.StringIO()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["lookup.py", "--doi", "10.1145/3777378, 10.9999/fake", "--json"],
+            ),
+            mock.patch.object(lookup, "fetch", side_effect=fake_fetch),
+            redirect_stdout(buf),
+        ):
+            rc = lookup.main()
+        self.assertEqual(rc, 0)
+        data = json.loads(buf.getvalue())
+        self.assertEqual(len(data["results"]), 1)
+        self.assertIn("citation_gbt7714", data["results"][0])
+        self.assertIn("citation_apa", data["results"][0])
+        checks = {c["query_doi"]: c["status"] for c in data["doi_checks"]}
+        self.assertEqual(checks["10.1145/3777378"], "found")
+        self.assertEqual(checks["10.9999/fake"], "not_found")
+
+    def test_format_flag_gbt7714_clean_stdout_and_conflict_error(self):
+        cr_ok = json.dumps(
+            {
+                "message": {
+                    "items": [
+                        {
+                            "title": ["Clean Format Paper"],
+                            "author": [{"family": "Doe", "given": "Jane"}],
+                            "issued": {"date-parts": [[2025]]},
+                            "DOI": "10.1000/clean",
+                            "container-title": ["Sensors"],
+                            "type": "journal-article",
+                        }
+                    ]
+                }
+            }
+        ).encode("utf-8")
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["lookup.py", "sensors", "--sources", "crossref", "--format", "gbt7714"],
+            ),
+            mock.patch.object(lookup, "fetch", return_value=cr_ok),
+            redirect_stdout(out_buf),
+            redirect_stderr(err_buf),
+        ):
+            rc = lookup.main()
+        self.assertEqual(rc, 0)
+        self.assertTrue(out_buf.getvalue().startswith("[1] Doe J. Clean Format Paper[J]. Sensors, 2025."))
+        self.assertEqual(err_buf.getvalue(), "")
+
+        # 冲突格式参数返回 2
+        conflict_out = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["lookup.py", "rag", "--json", "--bibtex"]),
+            redirect_stdout(conflict_out),
+        ):
+            rc2 = lookup.main()
+        self.assertEqual(rc2, 2)
+        self.assertIn("冲突", json.loads(conflict_out.getvalue())["error"])
+
 
 class TestGitHubLookup(unittest.TestCase):
     """测试 github_lookup.py 的校验、Trees/README 探测、许可证风险与串行熔断。"""
@@ -592,6 +735,83 @@ class TestGitHubLookup(unittest.TestCase):
         self.assertIn("429", data["error"])
         self.assertIn("site:github.com library", data["fallback"])
 
+    def test_parse_repo_identifier_and_single_repo_inspection(self):
+        self.assertEqual(
+            github_lookup.parse_repo_identifier("https://github.com/owner/dorm-repair/tree/main"),
+            "owner/dorm-repair",
+        )
+        self.assertEqual(
+            github_lookup.parse_repo_identifier("owner/dorm-repair.git"),
+            "owner/dorm-repair",
+        )
+        with self.assertRaises(ValueError):
+            github_lookup.parse_repo_identifier("https://gitee.com/owner/repo")
+
+        repo_payload = {
+            "full_name": "owner/dorm-repair",
+            "default_branch": "main",
+            "html_url": "https://github.com/owner/dorm-repair",
+            "description": "Dorm repair system",
+            "language": "Java",
+            "stargazers_count": 12,
+            "pushed_at": "2026-10-01T00:00:00Z",
+            "size": 2048,
+            "archived": True,
+            "fork": False,
+            "license": {"spdx_id": "MIT"},
+        }
+        tree_payload = {"tree": [{"type": "blob", "path": "pom.xml"}, {"type": "tree", "path": "src"}]}
+        readme_encoded = base64.b64encode("# Demo\n## 快速开始\nRedis".encode("utf-8")).decode("ascii")
+
+        def fake_fetch(url):
+            if url.endswith("/repos/owner/dorm-repair"):
+                return repo_payload
+            if "/git/trees/" in url:
+                return tree_payload
+            if url.endswith("/readme"):
+                return {"encoding": "base64", "content": readme_encoded}
+            raise AssertionError(f"Unexpected url: {url}")
+
+        buf = io.StringIO()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["github_lookup.py", "--repo", "https://github.com/owner/dorm-repair", "--json"],
+            ),
+            mock.patch.object(github_lookup, "fetch_json", side_effect=fake_fetch),
+            redirect_stdout(buf),
+        ):
+            rc = github_lookup.main()
+        self.assertEqual(rc, 0)
+        data = json.loads(buf.getvalue())
+        self.assertEqual(data["total_count"], 1)
+        item = data["items"][0]
+        self.assertTrue(item["archived"])
+        self.assertIn("pom.xml", item["key_files"])
+        self.assertTrue(item["has_run_guide"])
+
+        # 404 返回退出码 1
+        err_404 = urllib.error.HTTPError("https://api.github.com/repos/u/ghost", 404, "Not Found", {}, io.BytesIO(b""))
+        buf_404 = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["github_lookup.py", "--repo", "u/ghost", "--json"]),
+            mock.patch.object(github_lookup, "fetch_json", side_effect=err_404),
+            redirect_stdout(buf_404),
+        ):
+            rc_404 = github_lookup.main()
+        self.assertEqual(rc_404, 1)
+        self.assertIn("404", json.loads(buf_404.getvalue())["message"])
+
+        # 非法 --repo 返回退出码 2
+        buf_bad = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["github_lookup.py", "--repo", "invalid_only", "--json"]),
+            redirect_stdout(buf_bad),
+        ):
+            rc_bad = github_lookup.main()
+        self.assertEqual(rc_bad, 2)
+
 
 class TestCheckEnvironment(unittest.TestCase):
     """测试 check_environment.py 的密钥透传、脱敏、状态判定与 --strict 退出码。"""
@@ -715,19 +935,19 @@ class TestSkillMetadataAndEvals(unittest.TestCase):
 
     def test_dependencies_and_evals_files(self):
         deps = json.loads((ROOT_DIR / "skill-dependencies.json").read_text(encoding="utf-8"))
-        self.assertEqual(deps["version"], "1.4.0")
+        self.assertEqual(deps["version"], "1.5.0")
         oa = next(e for e in deps["network_endpoints"] if e["name"] == "OpenAlex")
         self.assertFalse(oa["required"])
 
         evals = json.loads((ROOT_DIR / "evals" / "evals.json").read_text(encoding="utf-8"))
         self.assertEqual(evals["skill_name"], "source-first")
-        self.assertEqual(evals["version"], "1.4.0")
+        self.assertEqual(evals["version"], "1.5.0")
         trigs = evals["trigger_evals"]
-        self.assertEqual(len(trigs), 20)
-        self.assertEqual(sum(1 for t in trigs if t["should_trigger"]), 10)
-        self.assertEqual(sum(1 for t in trigs if not t["should_trigger"]), 10)
+        self.assertEqual(len(trigs), 22)
+        self.assertEqual(sum(1 for t in trigs if t["should_trigger"]), 11)
+        self.assertEqual(sum(1 for t in trigs if not t["should_trigger"]), 11)
         behs = evals["behavioral_evals"]
-        self.assertEqual(len(behs), 5)
+        self.assertEqual(len(behs), 6)
         for b in behs:
             self.assertTrue(b["id"] and b["prompt"] and b["assertions"])
 

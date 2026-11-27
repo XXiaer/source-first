@@ -1,6 +1,6 @@
 {
   "skill_name": "source-first",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "trigger_evals": [
     {
       "id": "trig_01",
@@ -101,6 +101,16 @@
       "id": "trig_20",
       "query": "把这份已经定稿的结课报告 Markdown 转成排版好看的 Word 文档，保持原来的内容和引用条目不动",
       "should_trigger": false
+    },
+    {
+      "id": "trig_21",
+      "query": "我在网上看到这个项目 https://github.com/example/dorm-repair，帮我看看适不适合拿来做本科毕设骨架，大概要改哪些模块？",
+      "should_trigger": true
+    },
+    {
+      "id": "trig_22",
+      "query": "git rebase 和 git merge 有什么区别？平时团队协作推荐用哪个？",
+      "should_trigger": false
     }
   ],
   "behavioral_evals": [
@@ -157,6 +167,17 @@
         "两阶段需求均完整交付，未遗漏其中一条线",
         "文献部分全部来自真实检索且带可点击链接和覆盖说明",
         "项目部分按可运行性与许可证规范评估，未给虚假语义相似度百分比"
+      ]
+    },
+    {
+      "id": "beh_06_single_repo_404_or_archived",
+      "prompt": "帮我评估一下这个仓库 https://github.com/someone/ghost-grad-project 能不能直接拿来做毕业设计骨架？",
+      "condition": "使用 github_lookup.py --repo 直查，返回 HTTP 404（退出码 1）或返回 archived: true / license: null 的仓库。",
+      "expected_behavior": "不凭空猜测仓库内容；404 时明确告知未找到该公开仓库（请核对链接真伪或是否为私有仓）；若为已归档或无许可证仓库，明确标出不可直接复用（仅参考思路）及对应风险。",
+      "assertions": [
+        "使用 --repo 对目标仓库进行了实测核验而非凭链接名脑补",
+        "面对 404 或无许可证/已归档状态时如实披露风险",
+        "未推荐无许可证仓库代码用于直接复用"
       ]
     }
   ]

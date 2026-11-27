@@ -9,7 +9,7 @@ python <skill_dir>/scripts/github_lookup.py "<关键词>" --language <语言> --
 python <skill_dir>/scripts/github_lookup.py --repo "<URL或owner/repo>"   # 用户直接给出单个 GitHub 仓库链接时直查体检
 ```
 
-可一次拿到已过滤 Fork 仓的 GitHub 仓库列表、体积（MB）、许可证及风险分类、`src/` 与关键配置文件探测，以及 README 运行指南和中间件依赖线索（如需包含 Fork 可加 `--include-forks`）。
+脚本默认按 `capstone`（课设可运行与合规评分）综合排序，自动把体量在 0.2MB~35MB、宽松许可证（MIT/Apache-2.0/BSD）的真实可改项目排在前面，把 `<100KB` 空壳仓和无许可证仓库沉底；`--repo` 在核心接口 403/429 限流时会自动降级走 Search API + `raw.githubusercontent.com` 免配额通道。
 
 ## GitHub：有接口
 

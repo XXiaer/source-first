@@ -26,7 +26,7 @@ https://api.openalex.org/works?search=<关键词>&per-page=5&select=title,public
 - 要长期用建议申请免费 key，每天 1 美元额度：`https://openalex.org/upgrade`
 - `open_access.oa_url` 有值，说明有合法免费的全文，可以直接读。
 - `cited_by_count` 是真实的被引数。可以拿来判断一篇文献的地位，但不要拿它当质量唯一标准。
-- 支持 `filter=publication_year:>=<YYYY>`（对应 `--year-from`）。
+- 支持 `filter=from_publication_date:<YYYY>-01-01`（对应 `--year-from`）。
 
 ## arXiv：理工科预印本，能拿全文
 
@@ -90,7 +90,7 @@ https://api.semanticscholar.org/graph/v1/paper/search?query=<关键词>&limit=5&
 按可靠性排，四条路：
 
 1. **让用户自己下载 PDF。** 从学校图书馆把 PDF 下下来上传，技能负责整理、核验、生成引用。这条路命中率接近百分之百，优先用它。**注意：知网默认下载的 `.caj` 专有格式无法直接读取，需提前提醒用户在下载页选择“PDF 下载”或用 CAJViewer 转为 PDF 再上传。**
-2. **Crossref 查中文期刊的 DOI。** 正规中文期刊多数有 DOI，能核到就是真的，而且元数据最规范。
+2. **Crossref + 期刊官网定向检索（`search_web`）双通道。** 先用 `lookup.py` 查 Crossref（多数中文核心期刊有 `10.13328`/`10.11897` 等 DOI）；若未命中或无摘要，用 `search_web` 定向检索期刊官网（`site:jos.org.cn`、`site:cjc.ict.ac.cn`、`site:crad.ict.ac.cn`、`site:cipsc.org.cn`、`site:aas.net.cn`），核实真实标题、作者、刊期与摘要结论后引用。
 3. **中国科技论文在线** `https://www.paper.edu.cn/` 可访问，收录部分中文论文，能直接检索。
 4. **ChinaXiv** `https://chinaxiv.org/`，中科院科技论文预发布平台，可访问。站点是前端渲染，静态抓取进不去，必须用浏览器打开页面检索。
 
@@ -99,7 +99,7 @@ https://api.semanticscholar.org/graph/v1/paper/search?query=<关键词>&limit=5&
 - **NSTL 国家科技图书文献中心** `https://www.nstl.gov.cn/`：文摘库，能查到题录，看不到全文。适合确认“这篇中文文献确实存在”。
 - **国家科技报告服务系统** `https://www.nstrs.cn/`：科技报告，工科方向有些用。
 
-做不到的必须明说：**查不了知网、万方、维普，覆盖不了大部分中文核心期刊。** 写进输出的覆盖说明里，不要拿英文文献假装覆盖了国内研究。
+做不到的必须明说：**查不了知网、万方、维普，无法直接穿透订阅库全文。** 若双通道均未覆盖或覆盖不足，写进覆盖说明里，并**附上一条针对当前主题定制的知网专业检索式**（如 `SU=('检索增强生成' + 'RAG') * SU=('医疗')`），不要拿英文文献假装覆盖了国内研究。
 
 ## 检索纪律
 

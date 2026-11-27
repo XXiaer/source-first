@@ -29,12 +29,14 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
 TIMEOUT = 20
+RETRY_DELAY = 1.0
 MAX_AUTHORS = 20
 # 仅匹配合法 HTML/JATS 标签，避免误删数学式中的 < 或 >（如 a < b > c）
 TAG_RE = re.compile(r"</?(?:[a-zA-Z][a-zA-Z0-9:-]*)(?:\s[^>]*)?>")
@@ -56,18 +58,26 @@ def build_user_agent():
     """构造请求头 User-Agent，如设置了 CROSSREF_MAILTO 则附加礼貌池信息。"""
     mailto = os.environ.get("CROSSREF_MAILTO", "").strip()
     if mailto:
-        return f"source-first-lookup/1.5 (academic citation lookup; mailto:{mailto})"
-    return "source-first-lookup/1.5 (academic citation lookup; read-only)"
+        return f"source-first-lookup/1.6 (academic citation lookup; mailto:{mailto})"
+    return "source-first-lookup/1.6 (academic citation lookup; read-only)"
 
 
 def fetch(url, extra_headers=None):
-    """发送只读 GET 请求并返回响应字节。"""
+    """发送只读 GET 请求并返回响应字节；遇到瞬时 429/5xx 时短退避重试 1 次。"""
     headers = {"User-Agent": build_user_agent()}
     if extra_headers:
         headers.update(extra_headers)
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return r.read()
+    for attempt in range(2):
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return r.read()
+        except urllib.error.HTTPError as exc:
+            if attempt == 0 and exc.code in (429, 500, 502, 503, 504):
+                if RETRY_DELAY > 0:
+                    time.sleep(RETRY_DELAY)
+                continue
+            raise
 
 
 def clean_text(text):
@@ -187,7 +197,10 @@ def query_crossref(kw, limit, include_abstract=False, year_from=None):
     if year_from is not None:
         params["filter"] = f"from-pub-date:{year_from}"
     url = "https://api.crossref.org/works?" + urllib.parse.urlencode(params)
-    data = json.loads(fetch(url))
+    raw = fetch(url)
+    if not raw or not raw.strip():
+        raise ValueError("API returned empty response")
+    data = json.loads(raw)
     rows = [
         parse_crossref_item(it, include_abstract)
         for it in data.get("message", {}).get("items", [])
@@ -245,12 +258,15 @@ def query_openalex(kw, limit, include_abstract=False, year_from=None):
         "select": fields,
     }
     if year_from is not None:
-        params["filter"] = f"publication_year:>={year_from}"
+        params["filter"] = f"from_publication_date:{year_from}-01-01"
     api_key = os.environ.get("OPENALEX_API_KEY", "").strip()
     if api_key:
         params["api_key"] = api_key
     url = "https://api.openalex.org/works?" + urllib.parse.urlencode(params)
-    data = json.loads(fetch(url))
+    raw = fetch(url)
+    if not raw or not raw.strip():
+        raise ValueError("API returned empty response")
+    data = json.loads(raw)
     rows = [parse_openalex_item(it, include_abstract) for it in data.get("results", [])]
     return filter_by_year(rows, year_from)
 
@@ -318,7 +334,10 @@ def query_dblp(kw, limit, include_abstract=False, year_from=None):
         "https://dblp.org/search/publ/api?"
         + urllib.parse.urlencode({"q": kw, "h": str(limit), "format": "json"})
     )
-    data = json.loads(fetch(url))
+    raw = fetch(url)
+    if not raw or not raw.strip():
+        raise ValueError("API returned empty response")
+    data = json.loads(raw)
     hits = (data.get("result") or {}).get("hits") or {}
     hit_list = hits.get("hit") or []
     if isinstance(hit_list, dict):
@@ -376,7 +395,10 @@ def query_doaj(kw, limit, include_abstract=False, year_from=None):
         + urllib.parse.quote(kw, safe="")
         + f"?pageSize={limit}"
     )
-    data = json.loads(fetch(url))
+    raw = fetch(url)
+    if not raw or not raw.strip():
+        raise ValueError("API returned empty response")
+    data = json.loads(raw)
     out = []
     for it in data.get("results", []):
         b = it.get("bibjson", {})
@@ -535,8 +557,10 @@ def lookup_multiple_dois(doi_list, include_abstract=False):
     if len(doi_list) == 1:
         per_doi = [(doi_list[0], *lookup_by_doi(doi_list[0], include_abstract))]
     else:
+        has_mailto = bool(os.environ.get("CROSSREF_MAILTO", "").strip())
+        workers = min(4 if has_mailto else 2, len(doi_list))
         per_doi_map = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(doi_list))) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futs = {
                 pool.submit(lookup_by_doi, d, include_abstract): d
                 for d in doi_list

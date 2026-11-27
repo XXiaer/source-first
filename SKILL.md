@@ -70,9 +70,9 @@ description: "先有出处：动手前先查真实依据。用于：(1) 文献�
 - `scripts/github_lookup.py` — 项目线只读检索脚本（支持关键词搜索与 `--repo` 单仓体检、Trees API `src/` 探测、`--readme` 摘要与许可证风险标记）
 - `scripts/check_environment.py` — 只读环境与接口连通性自检脚本
 
-**按阶段按需加载**：
-- 文献线：检索阶段读 `study.md` + `sources.md`（优先运行 `python <skill_dir>/scripts/lookup.py`，可直接生成 `gbt7714`/`apa` 引文）；排版生成阶段再读 `citation-formats.md` + `output-templates.md`。
-- 项目线：检索阶段读 `project.md` + `repos.md`（优先运行 `python <skill_dir>/scripts/github_lookup.py`，给具体仓库链接时加 `--repo` 直查）；输出阶段再读 `output-templates.md`。
+**按阶段按需加载**（减少读取轮次，降低等待时间；多轮检索时及时用简短中文状态同步当前进度）：
+- 文献线：有 Python 环境时，**一次并行读取 `study.md` + `output-templates.md`** 后即可直接运行 `python <skill_dir>/scripts/lookup.py`（已内置接口参数与 `gbt7714`/`apa`/`bibtex` 格式化）；仅在无 Python 环境、接口异常需查备用源或需手拼专著/学位论文格式时，再按需补读 `sources.md` 或 `citation-formats.md`。
+- 项目线：有 Python 环境时，**一次并行读取 `project.md` + `output-templates.md`** 后即可直接运行 `python <skill_dir>/scripts/github_lookup.py`（已内置 `capstone` 适配排序与 `--repo` 免配额降级）；仅在无 Python 环境或需查 Gitee 细节时补读 `repos.md`。
 
 ## 交付前自检
 

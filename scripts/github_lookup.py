@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-UA = "source-first-github-lookup/1.5 (read-only)"
+UA = "source-first-github-lookup/1.6 (read-only)"
 TIMEOUT = 20
 REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -189,22 +189,8 @@ def inspect_repo_files(full_name, default_branch="main"):
     return sorted(set(found))
 
 
-def fetch_repo_readme(full_name):
-    """获取仓库 README 摘要，检测运行说明与常见中间件依赖线索。"""
-    readme_url = f"https://api.github.com/repos/{full_name}/readme"
-    try:
-        data = fetch_json(readme_url)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return {"readme_excerpt": "", "has_run_guide": False, "middleware_hints": []}
-        raise
-
-    raw_content = data.get("content") or ""
-    if (data.get("encoding") or "").lower() == "base64" and raw_content:
-        text = base64.b64decode(raw_content).decode("utf-8", errors="replace")
-    else:
-        text = raw_content
-
+def _parse_readme_text(text):
+    """从 README 纯文本提取运行说明、中间件线索与摘要。"""
     lower_text = text.lower()
     has_run_guide = any(kw in lower_text for kw in RUN_GUIDE_KEYWORDS)
     middleware_hints = [mw for mw in MIDDLEWARE_KEYWORDS if MIDDLEWARE_RE[mw].search(text)]
@@ -216,11 +202,90 @@ def fetch_repo_readme(full_name):
     }
 
 
+def fetch_raw_readme(full_name, default_branch="main"):
+    """通过 raw.githubusercontent.com 免配额读取仓库 README 文本。"""
+    branches = [default_branch or "main"]
+    if "master" not in branches:
+        branches.append("master")
+    for branch in branches:
+        for fname in ("README.md", "readme.md", "README_zh.md"):
+            raw_url = f"https://raw.githubusercontent.com/{full_name}/{urllib.parse.quote(branch, safe='')}/{fname}"
+            req = urllib.request.Request(raw_url, headers={"User-Agent": UA})
+            try:
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                    text = r.read().decode("utf-8", errors="replace")
+                    return _parse_readme_text(text)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                raise
+    return {"readme_excerpt": "", "has_run_guide": False, "middleware_hints": []}
+
+
+def fetch_repo_readme(full_name, default_branch="main", prefer_raw=False):
+    """获取仓库 README 摘要，检测运行说明与常见中间件依赖线索（限流时自动降级 Raw 通道）。"""
+    if prefer_raw:
+        return fetch_raw_readme(full_name, default_branch)
+    readme_url = f"https://api.github.com/repos/{full_name}/readme"
+    try:
+        data = fetch_json(readme_url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"readme_excerpt": "", "has_run_guide": False, "middleware_hints": []}
+        if is_rate_limit_error(exc):
+            return fetch_raw_readme(full_name, default_branch)
+        raise
+
+    raw_content = data.get("content") or ""
+    if (data.get("encoding") or "").lower() == "base64" and raw_content:
+        text = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+    else:
+        text = raw_content
+
+    return _parse_readme_text(text)
+
+
+def compute_suitability_score(item):
+    """按课设可运行性、体量黄金区间与许可证合规度计算启发式评分。"""
+    score = 0
+    size_kb = item.get("size_kb") or 0
+    if 200 <= size_kb <= 35840:
+        score += 30
+    elif (100 <= size_kb < 200) or (35840 < size_kb <= 51200):
+        score += 10
+    elif item.get("too_small"):
+        score -= 30
+    elif item.get("oversize"):
+        score -= 25
+
+    risk = item.get("license_risk")
+    if risk == "permissive":
+        score += 25
+    elif risk == "copyleft":
+        score += 5
+    elif risk == "none_prohibited":
+        score -= 20
+
+    stars = item.get("stars") or 0
+    if 1 <= stars <= 500:
+        score += 15
+    elif 500 < stars <= 3000:
+        score += 10
+
+    if item.get("description"):
+        score += 5
+    if item.get("archived"):
+        score -= 50
+    if item.get("fork"):
+        score -= 20
+    return score
+
+
 def normalize_repo_item(repo):
     """将 GitHub 仓库 JSON 规范化为课设适配字典。"""
     lic_label, lic_risk = classify_license(repo.get("license"))
     size_kb = repo.get("size") or 0
-    return {
+    item = {
         "full_name": repo.get("full_name") or "",
         "default_branch": repo.get("default_branch") or "main",
         "url": repo.get("html_url") or "",
@@ -237,6 +302,8 @@ def normalize_repo_item(repo):
         "license": lic_label,
         "license_risk": lic_risk,
     }
+    item["suitability_score"] = compute_suitability_score(item)
+    return item
 
 
 def enrich_repo_items(items, check_files, fetch_readme, check_limit):
@@ -262,7 +329,7 @@ def enrich_repo_items(items, check_files, fetch_readme, check_limit):
 
         if fetch_readme:
             try:
-                row.update(fetch_repo_readme(row["full_name"]))
+                row.update(fetch_repo_readme(row["full_name"], row.get("default_branch", "main")))
             except urllib.error.HTTPError as exc:
                 if is_rate_limit_error(exc):
                     row["readme_error"] = f"HTTP {exc.code} 限流，已熔断后续检查"
@@ -301,17 +368,49 @@ def parse_repo_identifier(raw):
 
 
 def inspect_single_repo(full_name, check_files=True, fetch_readme=True):
-    """直接体检单个 GitHub 仓库；404 返回 (0, [])，其余异常上抛。"""
+    """直接体检单个 GitHub 仓库；核心接口限流时自动降级走 Search API + Raw README。"""
     url = f"https://api.github.com/repos/{full_name}"
     try:
         repo = fetch_json(url)
+        items = [normalize_repo_item(repo)]
+        enrich_repo_items(items, check_files, fetch_readme, check_limit=1)
+        return 1, items
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return 0, []
+        if not is_rate_limit_error(exc):
+            raise
+
+    # 降级：走独立限流池的 Search API + 免配额 Raw README
+    search_url = (
+        "https://api.github.com/search/repositories?"
+        + urllib.parse.urlencode({"q": f"repo:{full_name}"})
+    )
+    try:
+        data = fetch_json(search_url)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 422:
+            return 0, []
         raise
-    items = [normalize_repo_item(repo)]
-    enrich_repo_items(items, check_files, fetch_readme, check_limit=1)
-    return 1, items
+    matched = next(
+        (
+            r for r in data.get("items", [])
+            if (r.get("full_name") or "").lower() == full_name.lower()
+        ),
+        None,
+    )
+    if matched is None:
+        return 0, []
+    row = normalize_repo_item(matched)
+    row["degraded_from_rate_limit"] = True
+    if check_files:
+        row["key_files_error"] = "核心接口限流，已降级走 Search API + Raw README 通道"
+    if fetch_readme:
+        try:
+            row.update(fetch_repo_readme(full_name, row["default_branch"], prefer_raw=True))
+        except Exception as exc:
+            row["readme_error"] = f"{type(exc).__name__}: {exc}"
+    return 1, [row]
 
 
 def search_repos(
@@ -327,7 +426,7 @@ def search_repos(
     include_forks=False,
     fetch_readme=False,
 ):
-    """构造查询条件并拉取仓库元信息，可选串行探测关键文件与 README。"""
+    """构造查询条件并拉取仓库元信息，可选按课设适配评分重排及探测关键文件与 README。"""
     parts = [keywords.strip(), "archived:false"]
     if not include_forks:
         parts.append("fork:false")
@@ -343,20 +442,26 @@ def search_repos(
     if pushed_after:
         parts.append(f"pushed:>{pushed_after.strip()}")
 
+    api_sort = "updated" if sort == "capstone" else sort
+    per_page = min(max(limit * 2, 10), 20) if sort == "capstone" else limit
+
     q = " ".join(parts)
     url = (
         "https://api.github.com/search/repositories?"
         + urllib.parse.urlencode(
             {
                 "q": q,
-                "sort": sort,
-                "per_page": str(limit),
+                "sort": api_sort,
+                "per_page": str(per_page),
             }
         )
     )
     data = fetch_json(url)
     total = data.get("total_count", 0)
     items = [normalize_repo_item(repo) for repo in data.get("items", [])]
+    if sort == "capstone":
+        items.sort(key=lambda r: r.get("suitability_score", 0), reverse=True)
+        items = items[:limit]
     enrich_repo_items(items, check_files, fetch_readme, check_limit)
     return total, items
 
@@ -397,7 +502,12 @@ def main():
     p.add_argument("--pushed-after", default="", help="限定最近提交日期，如 2025-01-01")
     p.add_argument("--min-size", type=int, default=10, help="最小仓库体积（KB，默认 10 过滤空壳仓，传 0 关闭）")
     p.add_argument("--min-stars", type=int, default=0, help="最小 Star 数（默认 0）")
-    p.add_argument("--sort", default="updated", choices=["updated", "stars", "forks"], help="排序方式，默认 updated")
+    p.add_argument(
+        "--sort",
+        default="capstone",
+        choices=["capstone", "updated", "stars", "forks"],
+        help="排序方式，默认 capstone（按课设可运行与合规评分综合排序）",
+    )
     p.add_argument("--limit", type=int, default=5, help="返回条数（1-10），默认 5")
     p.add_argument("--check-files", action="store_true", help="探测前 N 个候选的关键文件与 src/ 目录")
     p.add_argument("--readme", action="store_true", help="拉取前 N 个候选的 README 摘要与中间件线索")

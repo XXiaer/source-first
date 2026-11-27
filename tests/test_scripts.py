@@ -413,6 +413,30 @@ class TestLookupQueriesAndCLI(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("error", json.loads(buf.getvalue()))
 
+        oa_payload = json.dumps({"results": []}).encode("utf-8")
+        with mock.patch.object(lookup, "fetch", return_value=oa_payload) as m_oa:
+            lookup.query_openalex("rag", 3, year_from=2023)
+        self.assertIn("filter=from_publication_date%3A2023-01-01", m_oa.call_args[0][0])
+
+    def test_fetch_transient_retry_and_dblp_empty_body(self):
+        err_429 = urllib.error.HTTPError("https://api.crossref.org/works", 429, "Too Many Requests", {}, io.BytesIO(b""))
+        resp_ok = mock.MagicMock()
+        resp_ok.read.return_value = b'{"ok": true}'
+        resp_ok.__enter__.return_value = resp_ok
+        resp_ok.__exit__.return_value = False
+
+        with (
+            mock.patch.object(lookup, "RETRY_DELAY", 0),
+            mock.patch.object(lookup.urllib.request, "urlopen", side_effect=[err_429, resp_ok]) as m_open,
+        ):
+            raw = lookup.fetch("https://api.crossref.org/works")
+        self.assertEqual(raw, b'{"ok": true}')
+        self.assertEqual(m_open.call_count, 2)
+
+        with mock.patch.object(lookup, "fetch", return_value=b"   "):
+            with self.assertRaises(ValueError):
+                lookup.query_dblp("rag", 2)
+
     def test_default_sources_excludes_doaj_and_unknown_source_warns(self):
         buf = io.StringIO()
         with (
@@ -446,6 +470,30 @@ class TestLookupQueriesAndCLI(unittest.TestCase):
             rc = lookup.main()
         self.assertEqual(rc, 2)
         self.assertIn("error", json.loads(buf.getvalue()))
+
+        oa_payload = json.dumps({"results": []}).encode("utf-8")
+        with mock.patch.object(lookup, "fetch", return_value=oa_payload) as m_oa:
+            lookup.query_openalex("rag", 3, year_from=2023)
+        self.assertIn("filter=from_publication_date%3A2023-01-01", m_oa.call_args[0][0])
+
+    def test_fetch_transient_retry_and_dblp_empty_body(self):
+        err_429 = urllib.error.HTTPError("https://api.crossref.org/works", 429, "Too Many Requests", {}, io.BytesIO(b""))
+        resp_ok = mock.MagicMock()
+        resp_ok.read.return_value = b'{"ok": true}'
+        resp_ok.__enter__.return_value = resp_ok
+        resp_ok.__exit__.return_value = False
+
+        with (
+            mock.patch.object(lookup, "RETRY_DELAY", 0),
+            mock.patch.object(lookup.urllib.request, "urlopen", side_effect=[err_429, resp_ok]) as m_open,
+        ):
+            raw = lookup.fetch("https://api.crossref.org/works")
+        self.assertEqual(raw, b'{"ok": true}')
+        self.assertEqual(m_open.call_count, 2)
+
+        with mock.patch.object(lookup, "fetch", return_value=b"   "):
+            with self.assertRaises(ValueError):
+                lookup.query_dblp("rag", 2)
 
         # 退出码 3：全失败 (--json)
         buf = io.StringIO()
@@ -812,6 +860,81 @@ class TestGitHubLookup(unittest.TestCase):
             rc_bad = github_lookup.main()
         self.assertEqual(rc_bad, 2)
 
+    def test_single_repo_rate_limit_falls_back_to_search_and_raw_readme(self):
+        err_403 = urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/demo",
+            403,
+            "rate limit exceeded",
+            {},
+            io.BytesIO(b'{"message":"API rate limit exceeded"}'),
+        )
+        search_hit = {
+            "total_count": 1,
+            "items": [
+                {
+                    "full_name": "owner/demo",
+                    "default_branch": "main",
+                    "html_url": "https://github.com/owner/demo",
+                    "description": "Demo",
+                    "language": "Java",
+                    "stargazers_count": 8,
+                    "pushed_at": "2026-11-01T00:00:00Z",
+                    "size": 1024,
+                    "archived": False,
+                    "fork": False,
+                    "license": {"spdx_id": "MIT"},
+                }
+            ],
+        }
+
+        def fake_fetch(url):
+            if url.endswith("/repos/owner/demo"):
+                raise err_403
+            if "search/repositories" in url:
+                return search_hit
+            raise AssertionError(f"Unexpected url: {url}")
+
+        with (
+            mock.patch.object(github_lookup, "fetch_json", side_effect=fake_fetch),
+            mock.patch.object(
+                github_lookup,
+                "fetch_raw_readme",
+                return_value={"readme_excerpt": "Quick Start Redis", "has_run_guide": True, "middleware_hints": ["redis"]},
+            ),
+        ):
+            total, items = github_lookup.inspect_single_repo("owner/demo", check_files=True, fetch_readme=True)
+        self.assertEqual(total, 1)
+        self.assertTrue(items[0]["degraded_from_rate_limit"])
+        self.assertTrue(items[0]["has_run_guide"])
+        self.assertEqual(items[0]["middleware_hints"], ["redis"])
+
+        err_422 = urllib.error.HTTPError("https://api.github.com/search/repositories", 422, "Unprocessable", {}, io.BytesIO(b""))
+
+        def fake_fetch_422(url):
+            if url.endswith("/repos/owner/missing"):
+                raise err_403
+            raise err_422
+
+        with mock.patch.object(github_lookup, "fetch_json", side_effect=fake_fetch_422):
+            total2, items2 = github_lookup.inspect_single_repo("owner/missing", check_files=True, fetch_readme=True)
+        self.assertEqual(total2, 0)
+        self.assertEqual(items2, [])
+
+    def test_capstone_sort_ranks_permissive_medium_repos_first(self):
+        payload = {
+            "total_count": 3,
+            "items": [
+                {"full_name": "u/empty", "size": 20, "stars": 0, "license": None, "description": ""},
+                {"full_name": "u/nolicense", "size": 3000, "stars": 10, "license": None, "description": "no lic"},
+                {"full_name": "u/best", "size": 3072, "stars": 12, "license": {"spdx_id": "MIT"}, "description": "good"},
+            ],
+        }
+        with mock.patch.object(github_lookup, "fetch_json", return_value=payload):
+            _, cap_items = github_lookup.search_repos("dorm", "Java", "", 10, 0, "capstone", 3, False, 2)
+            _, upd_items = github_lookup.search_repos("dorm", "Java", "", 10, 0, "updated", 3, False, 2)
+        self.assertEqual([x["full_name"] for x in cap_items], ["u/best", "u/nolicense", "u/empty"])
+        self.assertEqual([x["full_name"] for x in upd_items], ["u/empty", "u/nolicense", "u/best"])
+
 
 class TestCheckEnvironment(unittest.TestCase):
     """测试 check_environment.py 的密钥透传、脱敏、状态判定与 --strict 退出码。"""
@@ -935,13 +1058,13 @@ class TestSkillMetadataAndEvals(unittest.TestCase):
 
     def test_dependencies_and_evals_files(self):
         deps = json.loads((ROOT_DIR / "skill-dependencies.json").read_text(encoding="utf-8"))
-        self.assertEqual(deps["version"], "1.5.0")
+        self.assertEqual(deps["version"], "1.6.0")
         oa = next(e for e in deps["network_endpoints"] if e["name"] == "OpenAlex")
         self.assertFalse(oa["required"])
 
         evals = json.loads((ROOT_DIR / "evals" / "evals.json").read_text(encoding="utf-8"))
         self.assertEqual(evals["skill_name"], "source-first")
-        self.assertEqual(evals["version"], "1.5.0")
+        self.assertEqual(evals["version"], "1.6.0")
         trigs = evals["trigger_evals"]
         self.assertEqual(len(trigs), 22)
         self.assertEqual(sum(1 for t in trigs if t["should_trigger"]), 11)
